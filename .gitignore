@@ -1,0 +1,7 @@
+.env
+config/client.json
+config/*.local.json
+*.log
+.DS_Store
+node_modules/
+.omo
