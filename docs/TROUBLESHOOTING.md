@@ -6,6 +6,8 @@
 ./scripts/doctor.sh
 ```
 
+При `--integration-test` doctor проверяет не только HTTP-ответ, но и реальную запись через независимый n8n HTTP Request: HubSpot contact по ID/email, Journal и Leads/CRM-вкладку.
+
 `doctor.sh` проверяет контейнеры, readiness, конфиг, активность workflow, Header Auth, назначение credentials и параметры. Он не подменяет реальный API-тест: для реальной заявки нужен `--integration-test`.
 
 ## HTTP-ответы
@@ -43,12 +45,11 @@
 
 ## Конфиг
 
-- `config/client.json` должен быть тем файлом, на который указывает `LEAD_CONFIG_FILE`.
-- После изменения `LEAD_CONFIG_FILE`:
-
-```bash
-docker compose up -d
-```
+- Контейнер монтирует весь `./config` и всегда читает `config/client.json`; `LEAD_CONFIG_FILE` должен указывать на этот файл для host-скриптов.
+- После изменения `config/client.json` конфиг читается на следующем запросе; если менялся compose/volume — `docker compose up -d`.
+- Если Doctor сообщает, что контейнер использует другой конфиг, пересоздайте n8n: `docker compose up -d`.
+- Пустая вкладка Journal: создайте заголовки первой строкой (см. Google Sheets integration).
+- Время в Sheets/Telegram не совпадает: проверьте `timezone` в конфиге (IANA), например `Asia/Tbilisi`; технические timestamps в executions остаются UTC.
 
 - `doctor.sh` сравнивает hash файла на хосте и в контейнере; если они разные — конфиг не перемонтирован.
 - `node scripts/config-check.mjs config/client.json` покажет ошибку валидатора.
@@ -92,6 +93,20 @@ http://localhost:5678/rest/oauth2-credential/callback
 - Проверьте `parse_mode=HTML`: шаблон не должен содержать незакрытые теги.
 - При ошибке Telegram заявка уже сохранена: ответ `_with_notification_error`, `notified:false`, `warnings`, execution `error`.
 - Если уведомления не нужны, `notifications.enabled=false`; credential не требуется.
+
+## HubSpot: `crm=created`, но контакта нет
+
+- `doctor.sh --integration-test` теперь делает независимый read-back через n8n HTTP Request: GET contact по ID и search по email. Если read-back PASS, контакт существует именно в том Portal ID, к которому привязан credential.
+- Проверьте execution `Validate Client Config`: если там `crm.provider=google_sheets`, HubSpot-ветка не выполнялась; `crm=created` относится к Google Sheets.
+- Проверьте, что контейнер читает актуальный `config/client.json`: `doctor.sh` сравнивает hash host/container.
+- Если используется другой Portal ID, контакт будет в другом аккаунте; сверьте `portalId` через `GET /account-info/v3/details` с ожидаемым.
+
+## Leads вместо Journal
+
+- Проверьте в execution `Validate Client Config`: `crm.provider` и `journal.enabled`.
+- Проверьте `Journal Enabled?` и `Journal Adapter - Google Sheets`: должен выполняться Journal adapter, а не CRM adapter.
+- Journal должен иметь заголовки в первой строке; пустая вкладка не заполняется автоматически.
+- `doctor.sh --integration-test` проверяет Journal row и отсутствие ошибочной записи в Leads для HubSpot-режима.
 
 ## HubSpot
 

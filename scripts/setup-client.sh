@@ -107,6 +107,7 @@ ask_yn() {
 }
 
 client_name="$(ask 'Имя клиента' "$(json_get clientName)" CLIENT_NAME)"
+timezone="$(ask 'Часовой пояс клиента (IANA, например Asia/Tbilisi)' "$(json_get timezone)" CLIENT_TIMEZONE)"
 source_default="$(ask 'Источник заявки по умолчанию' "$(json_get source.defaultSource)" SOURCE_DEFAULT)"
 crm_provider="$(ask 'CRM-провайдер (hubspot/google_sheets/none)' "$(json_get crm.provider)" CRM_PROVIDER)"
 case "$crm_provider" in
@@ -161,6 +162,7 @@ if [ "$errors_enabled" = "true" ]; then
 fi
 
 CLIENT_NAME="$client_name" \
+CLIENT_TIMEZONE="$timezone" \
 SOURCE_DEFAULT="$source_default" \
 CRM_PROVIDER="$crm_provider" \
 GOOGLE_SHEETS_ID="$sheet_id" \
@@ -194,6 +196,7 @@ def text(name):
 
 base.setdefault("version", 2)
 base["clientName"] = text("CLIENT_NAME") or base.get("clientName", "Client")
+base["timezone"] = text("CLIENT_TIMEZONE") or base.get("timezone", "UTC")
 base.setdefault("source", {})["type"] = "webhook"
 base["source"]["defaultSource"] = text("SOURCE_DEFAULT") or "unknown"
 
@@ -284,5 +287,5 @@ if [[ "$CONFIG_FILE" = /* ]]; then
 else
   echo "В .env укажите: LEAD_CONFIG_FILE=./${CONFIG_FILE}"
 fi
-echo "Затем перезапустите n8n: docker compose up -d"
+echo "Конфиг читается на каждом запросе; перезапуск n8n не нужен. Если меняли compose/volume — выполните docker compose up -d."
 echo "Запустите: ./scripts/doctor.sh"

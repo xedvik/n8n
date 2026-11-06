@@ -6,3 +6,5 @@ config/*.local.json
 node_modules/
 .omo
 config/.client-config.*
+
+__pycache__/

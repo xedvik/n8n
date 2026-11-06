@@ -77,6 +77,11 @@ if [ -f "$CONFIG_FILE" ]; then
   fi
 fi
 
+if [ -f "$TMP_DIR/normalized.json" ]; then
+  timezone="$(python3 -c "import json,sys; print(json.load(open(sys.argv[1], encoding='utf-8')).get('timezone','UTC'))" "$TMP_DIR/normalized.json")"
+  ok "Client timezone: ${timezone}"
+fi
+
 if [ -f "$CONFIG_FILE" ]; then
   host_hash="$(sha256sum "$CONFIG_FILE" | awk '{print $1}')"
   container_hash="$(docker compose exec -T n8n sha256sum /home/node/config/client.json 2>/dev/null | awk '{print $1}' || true)"
@@ -194,6 +199,37 @@ else
   fi
 fi
 
+run_integration_readback() {
+  local email="$1"
+  local generated="$TMP_DIR/readback.json"
+  local readback_id exec_id status error_json
+
+  if ! python3 scripts/build-readback-workflow.py \
+    "$TMP_DIR/integration.json" "$TMP_DIR/normalized.json" "$TMP_DIR/workflow.json" \
+    "$generated" "$email" > "$TMP_DIR/readback-id.txt" 2> "$TMP_DIR/readback-build.err"; then
+    fail "Could not build independent read-back workflow: $(cat "$TMP_DIR/readback-build.err")"
+    return 1
+  fi
+  readback_id="$(tr -d '\r\n' < "$TMP_DIR/readback-id.txt")"
+
+  docker compose cp "$generated" n8n:/tmp/doctor-readback.json >/dev/null
+  if ! docker compose exec -T n8n n8n import:workflow --input=/tmp/doctor-readback.json >/dev/null 2>&1; then
+    fail "Could not import independent read-back workflow"
+    return 1
+  fi
+  docker compose exec -T -e N8N_RUNNERS_BROKER_PORT=5680 n8n n8n execute --id="$readback_id" --rawOutput >/dev/null 2>&1 || true
+  exec_id="$(docker compose exec -T postgres psql -U "${POSTGRES_USER:-n8n}" -d "${POSTGRES_DB:-n8n}" -Atc "select id from execution_entity where \"workflowId\"='${readback_id}' order by id desc limit 1" | tr -d '\r')"
+  status="$(docker compose exec -T postgres psql -U "${POSTGRES_USER:-n8n}" -d "${POSTGRES_DB:-n8n}" -Atc "select status from execution_entity where id=${exec_id:-0}" | tr -d '\r')"
+  if [ "$status" = "success" ]; then
+    ok "Independent API read-back verified selected CRM/Journal/Leads targets"
+  else
+    error_json="$(docker compose exec -T postgres psql -U "${POSTGRES_USER:-n8n}" -d "${POSTGRES_DB:-n8n}" -Atc "select data from execution_data where \"executionId\"=${exec_id:-0}" 2>/dev/null | docker compose exec -T n8n node /home/node/scripts/read-execution.mjs 2>/dev/null || true)"
+    fail "Independent API read-back failed (execution ${exec_id:-unknown}): ${error_json:-inspect n8n Executions}"
+  fi
+  docker compose exec -T n8n rm -f /tmp/doctor-readback.json >/dev/null 2>&1 || true
+  docker compose exec -T postgres psql -U "${POSTGRES_USER:-n8n}" -d "${POSTGRES_DB:-n8n}" -c "delete from workflow_entity where id='${readback_id}';" >/dev/null 2>&1 || true
+}
+
 if [ "$INTEGRATION_TEST" = "1" ]; then
   echo
   warn "Integration test will create real CRM/journal data and may send a notification."
@@ -236,7 +272,7 @@ if journal.get("enabled"):
 print(f"OK:   Integration request accepted: HTTP {body.get('status')}, crm={crm.get('status')}, notified={body.get('notified')}")
 PY
       then
-        :
+        run_integration_readback "doctor@example.com"
       else
         fail "Integration response is not a successful lead-intake response"
       fi

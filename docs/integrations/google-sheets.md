@@ -94,6 +94,8 @@ Created At | Request ID | Stage | Error | Lead JSON | Execution ID
 
 В Google Sheets-нодах включён `Cell Format = RAW`: телефон сохраняется строкой (`+7...`), а не превращается в число.
 
+Колонка `Created At` в Leads/Journal заполняется в IANA timezone из `config/client.json` (например, `Asia/Tbilisi`). В execution n8n при этом хранится технический UTC timestamp. Journal должен иметь заголовки первой строкой; пустая вкладка Journal не будет автоматически заполнена заголовками.
+
 Journal и Errors — это отдельные хранилища PII. В отличие от executions, они не prune-ятся автоматически; ограничьте доступ к таблице и настройте политику хранения/очистки под требования клиента.
 
 ## 4. Конфигурация

@@ -1,6 +1,7 @@
 {
   "version": 2,
   "clientName": "Example Client",
+  "timezone": "UTC",
   "source": {
     "type": "webhook",
     "defaultSource": "website",
@@ -80,7 +81,7 @@
     ],
     "telegram": {
       "chatId": "REPLACE_WITH_CHAT_ID",
-      "messageTemplate": "New lead\n\nName: {{name}}\nEmail: {{email}}\nPhone: {{phone}}\nSource: {{source}}\nMessage: {{message}}\nExternal ID: {{externalId}}\nRequest ID: {{requestId}}\nCRM: {{crmStatus}}"
+      "messageTemplate": "New lead\n\nName: {{name}}\nEmail: {{email}}\nPhone: {{phone}}\nSource: {{source}}\nMessage: {{message}}\nExternal ID: {{externalId}}\nRequest ID: {{requestId}}\nCRM: {{crmStatus}}\nCreated At: {{createdAt}}"
     }
   },
   "errors": {

@@ -48,20 +48,16 @@ docker compose ps
 
 - создаёт `config/client.json` из `config/example-client.json`;
 - спрашивает CRM-провайдера (`hubspot`, `google_sheets`, `none`);
+- спрашивает IANA timezone клиента (например, `Asia/Tbilisi`);
 - включает/выключает журнал, Telegram и error log;
 - запрашивает только несекретные параметры;
 - проверяет конфиг тем же валидатором, что workflow;
 - при повторном запуске сохраняет существующие настройки;
 - не записывает токены и секреты.
 
-После создания проверьте:
+Контейнер монтирует весь каталог `./config` в `/home/node/config` и всегда читает `client.json`. Изменения содержимого `client.json` подхватываются на следующем запросе без пересоздания контейнера.
 
-```bash
-grep '^LEAD_CONFIG_FILE=' .env
-docker compose up -d
-```
-
-Если `LEAD_CONFIG_FILE` указывает на другой файл, пересоздайте контейнер. Файл монтируется в контейнер как `/home/node/config/client.json`.
+`LEAD_CONFIG_FILE` в `.env` используется `doctor.sh` и должен указывать на `./config/client.json`. `setup-client.sh` пишет в `CONFIG_FILE` (по умолчанию `config/client.json`). Если вы меняли compose-файл/volume — выполните `docker compose up -d`.
 
 Секреты и OAuth-токены в `client.json` не хранятся. Их место — credentials n8n.
 
@@ -209,7 +205,7 @@ curl -i -X POST http://localhost:5678/webhook/lead-intake \
 ./scripts/doctor.sh
 ```
 
-Он проверяет контейнеры, readiness, конфиг, активность workflow, совпадение конфига в контейнере, Header Auth, назначение credentials и параметры. При `--integration-test` отправляет одну реальную заявку.
+Он проверяет контейнеры, readiness, конфиг, timezone, активность workflow, совпадение конфига в контейнере, Header Auth, назначение credentials и параметры. При `--integration-test` отправляет одну реальную заявку и делает **независимый read-back**: HubSpot contact по ID и email, строку Journal и отсутствие ошибочной записи в Leads (или строку Google Sheets CRM в режиме `google_sheets`).
 
 Типовые проблемы: [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
 
@@ -218,7 +214,8 @@ curl -i -X POST http://localhost:5678/webhook/lead-intake \
 - [ ] `.env` создан, ключи сгенерированы, `.env` не в Git.
 - [ ] `docker compose up -d` — оба контейнера healthy.
 - [ ] `./scripts/setup-client.sh` завершён, `config/client.json` создан.
-- [ ] `LEAD_CONFIG_FILE` указывает на нужный файл, n8n пересоздан.
+- [ ] `config/client.json` создан; `LEAD_CONFIG_FILE` указывает на него для `doctor.sh`.
+- [ ] `timezone` задан как IANA timezone клиента (например, `Asia/Tbilisi`).
 - [ ] Выбраны CRM/journal/notifications/errors.
 - [ ] Созданы нужные credentials в n8n и назначены нодам.
 - [ ] Header Auth назначен `Lead Webhook`.
@@ -232,6 +229,7 @@ curl -i -X POST http://localhost:5678/webhook/lead-intake \
 Основные блоки:
 
 - `source` — тип источника (`webhook`), default source, allowed sources.
+- `timezone` — IANA timezone клиента для отображения времени в Sheets/Telegram; технические timestamps остаются UTC.
 - `mapping` — входные поля → внутренний Lead.
 - `crm.provider` — `hubspot`, `google_sheets` или `none`.
 - `crm.hubspot.propertyMapping` — HubSpot property → поле Lead.

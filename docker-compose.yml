@@ -55,7 +55,7 @@ services:
       - n8n_data:/home/node/.n8n
       - ./workflows:/home/node/workflows:ro
       - ./scripts:/home/node/scripts:ro
-      - ${LEAD_CONFIG_FILE:-./config/example-client.json}:/home/node/config/client.json:ro
+      - ./config:/home/node/config:ro
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:5678/healthz/readiness || exit 1"]
       interval: 10s

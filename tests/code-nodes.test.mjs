@@ -102,6 +102,14 @@ test('rejects invalid v2 integration combinations', () => {
   noChat.notifications.telegram.chatId = '';
   assert.throws(() => validateConfig(noChat), /notifications\.telegram\.chatId/);
 
+  const badTimezone = clone(exampleConfig);
+  badTimezone.timezone = 'Not/A_Timezone';
+  assert.throws(() => validateConfig(badTimezone), /timezone must be a valid IANA timezone/);
+
+  const noTimezone = clone(exampleConfig);
+  delete noTimezone.timezone;
+  assert.equal(validateConfig(noTimezone).timezone, 'UTC');
+
   const noPersistence = clone(exampleConfig);
   noPersistence.crm.provider = 'none';
   noPersistence.journal.enabled = false;
@@ -140,6 +148,21 @@ test('normalizes a valid payload and derives first/last names', () => {
   assert.equal(normalized.lead.phone, '+79991234567');
   assert.equal(normalized.lead.source, 'website');
   assert.equal(normalized.meta.requestId, 'test-execution');
+});
+
+test('keeps technical time in UTC and formats display time in client timezone', () => {
+  const config = clone(exampleConfig);
+  config.timezone = 'Asia/Tbilisi';
+  const normalized = normalize(validLead, config);
+  assert.match(normalized.meta.receivedAt, /^\d{4}-\d{2}-\d{2}T.*Z$/);
+  assert.equal(normalized.meta.timezone, 'Asia/Tbilisi');
+  const expected = new Intl.DateTimeFormat('sv-SE', {
+    timeZone: 'Asia/Tbilisi',
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+  }).format(new Date(normalized.meta.receivedAt));
+  assert.equal(normalized.meta.displayReceivedAt, expected);
+  assert.notEqual(normalized.meta.displayReceivedAt, normalized.meta.receivedAt);
 });
 
 test('applies nested input mapping and source fallback', () => {
@@ -262,6 +285,8 @@ test('builds correct HTTP/response semantics for CRM, journal and notification s
   assert.equal(created.httpStatus, 201);
   assert.equal(created.response.status, 'created');
   assert.equal(created.response.saved, true);
+  assert.match(created.response.receivedAt, /Z$/);
+  assert.equal(typeof created.response.displayTime, 'string');
 
   const updated = build({ provider: 'hubspot', status: 'updated', httpStatus: 200, contactId: 'c1', matchedBy: 'email', matchCount: 1 });
   assert.equal(updated.httpStatus, 200);
@@ -294,15 +319,18 @@ test('builds correct HTTP/response semantics for CRM, journal and notification s
 test('maps journal rows and escapes notification values', () => {
   const context = contextFor({ provider: 'hubspot', status: 'updated', httpStatus: 200, contactId: 'c1' });
   context.lead.name = 'Ivan <Admin> & Co';
+  assert.equal(context.meta.displayReceivedAt !== undefined, true);
   const row = runCode('Map Journal Row', { input: context })[0].json;
   assert.equal(row['CRM Provider'], 'hubspot');
   assert.equal(row['CRM Status'], 'updated');
   assert.equal(row['CRM Contact ID'], 'c1');
   assert.equal(row['Name'], 'Ivan <Admin> & Co');
+  assert.equal(row['Created At'], context.meta.displayReceivedAt);
 
   const notification = runCode('Build Notification Message', { input: context })[0].json;
   assert.match(notification.text, /Ivan &lt;Admin&gt; &amp; Co/);
   assert.match(notification.text, /CRM: updated/);
+  assert.match(notification.text, /Created At: \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/);
 });
 
 test('maps HubSpot rate limit errors to HTTP 429', () => {

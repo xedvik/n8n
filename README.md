@@ -23,13 +23,7 @@ docker compose up -d
 ./scripts/setup-client.sh
 ```
 
-`setup-client.sh` создаст `config/client.json`, поможет выбрать интеграции и проверит конфиг. Затем:
-
-```bash
-# указать в .env:
-# LEAD_CONFIG_FILE=./config/client.json
-docker compose up -d
-```
+`setup-client.sh` создаст `config/client.json`, поможет выбрать интеграции, timezone и проверит конфиг. Каталог `./config` смонтирован в n8n целиком, поэтому изменения `client.json` видны без пересоздания контейнера; конфиг читается на каждый запрос. `LEAD_CONFIG_FILE` в `.env` используется `doctor.sh`; `setup-client.sh` пишет в `CONFIG_FILE` (по умолчанию `config/client.json`).
 
 Импорт workflow:
 - новая установка — `./scripts/import-workflow.sh`;
@@ -53,6 +47,7 @@ docker compose up -d
 - [Google Sheets](docs/integrations/google-sheets.md)
 - [Telegram](docs/integrations/telegram.md)
 - [HubSpot](docs/integrations/hubspot.md)
+- Время: `timezone` в `config/client.json` (IANA), например `Asia/Tbilisi`.
 - [Troubleshooting](docs/TROUBLESHOOTING.md)
 
 ## Структура
@@ -63,8 +58,10 @@ config/example-client.json      # v2-шаблон конфига
 config/example-legacy-google-sheets.json
 config/client.json              # локальный конфиг клиента, gitignored
 scripts/setup-client.sh         # интерактивный onboarding
-scripts/doctor.sh               # диагностика
+scripts/doctor.sh               # диагностика + независимый API read-back
 scripts/config-check.mjs        # валидация конфига тем же кодом, что в workflow
+scripts/build-readback-workflow.py
+scripts/read-execution.mjs
 scripts/import-workflow.sh      # импорт для свежей установки
 docs/                           # инструкции и troubleshooting
 tests/                          # unit и smoke тесты
@@ -76,6 +73,7 @@ tests/                          # unit и smoke тесты
 - В workflow нет credentials: их нужно назначить в n8n UI после импорта.
 - Header Auth обязателен для webhook; секрет хранится в n8n credential и локальном `.env` для тестов.
 - PII в executions ограничена retention: 7 дней / 5000 записей. Google Sheets Journal/Errors хранят PII отдельно и требуют собственной политики доступа/очистки.
+- Время в Sheets/Telegram отображается в IANA timezone клиента; executions хранят технический UTC timestamp.
 - `config/client.json` содержит только несекретные параметры. Токены и OAuth-ключи хранятся только в n8n credentials.
 
 ## Ограничения v0.2

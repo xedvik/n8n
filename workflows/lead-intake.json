@@ -9,7 +9,7 @@
         "authentication": "headerAuth",
         "responseMode": "responseNode"
       },
-      "id": "52656f53-0881-42a5-b757-bad951493819",
+      "id": "5da97b09-0628-44c5-8ff4-463c34597763",
       "name": "Lead Webhook",
       "type": "n8n-nodes-base.webhook",
       "typeVersion": 2.2,
@@ -25,7 +25,7 @@
         "fileSelector": "/home/node/config/client.json",
         "options": {}
       },
-      "id": "2225d0e9-f9ee-47d6-abf8-c2f9ca2666f9",
+      "id": "8ddacb88-9669-4e9d-88d3-2417c2186053",
       "name": "Load Client Config",
       "type": "n8n-nodes-base.readWriteFile",
       "typeVersion": 1.1,
@@ -42,7 +42,7 @@
         "destinationKey": "config",
         "options": {}
       },
-      "id": "b3218562-ae18-4cbe-a08b-6629ea95ff35",
+      "id": "32df0b35-4e11-4d67-89ef-3876397fdc46",
       "name": "Parse Client Config",
       "type": "n8n-nodes-base.extractFromFile",
       "typeVersion": 1.2,
@@ -55,9 +55,9 @@
     {
       "parameters": {
         "mode": "runOnceForAllItems",
-        "jsCode": "const raw = $input.first().json.config;\n\nif (!raw || typeof raw !== 'object' || Array.isArray(raw)) {\n  throw new Error('Client config must be a JSON object');\n}\n\nconst failures = [];\nconst isObject = (value) => Boolean(value) && typeof value === 'object' && !Array.isArray(value);\nconst isText = (value) => typeof value === 'string' && value.trim().length > 0;\nconst fail = (message) => failures.push(message);\nconst requireObject = (value, path) => {\n  if (!isObject(value)) {\n    fail(`${path} must be an object`);\n    return {};\n  }\n  return value;\n};\nconst requireText = (object, key, path) => {\n  if (!isText(object[key])) fail(`${path} must be a non-empty string`);\n};\nconst requireSheets = (value, path) => {\n  const sheets = requireObject(value, path);\n  requireText(sheets, 'spreadsheetId', `${path}.spreadsheetId`);\n  requireText(sheets, 'sheetName', `${path}.sheetName`);\n  const columns = requireObject(sheets.columns, `${path}.columns`);\n  if (!isText(columns.name)) fail(`${path}.columns.name must be a non-empty string`);\n  if (!isText(columns.email) && !isText(columns.phone)) {\n    fail(`${path}.columns must include email or phone`);\n  }\n  return sheets;\n};\n\nconst legacy = !raw.version || Number(raw.version) < 2;\nlet config;\n\nif (legacy) {\n  const oldSheets = requireObject(raw.googleSheets, 'googleSheets');\n  config = {\n    version: 2,\n    clientName: raw.clientName || 'Client',\n    source: {\n      type: 'webhook',\n      defaultSource: (raw.defaults && raw.defaults.source) || 'unknown',\n      allowedSources: [],\n    },\n    mapping: raw.mapping,\n    crm: {\n      provider: 'google_sheets',\n      googleSheets: {\n        spreadsheetId: oldSheets.spreadsheetId,\n        leadsSheetName: oldSheets.leadsSheetName,\n        columns: oldSheets.columns,\n      },\n    },\n    journal: { enabled: false },\n    notifications: {\n      enabled: true,\n      channels: ['telegram'],\n      telegram: raw.telegram,\n    },\n    errors: {\n      enabled: true,\n      provider: 'google_sheets',\n      googleSheets: {\n        spreadsheetId: oldSheets.spreadsheetId,\n        sheetName: oldSheets.errorsSheetName,\n        columns: oldSheets.errorColumns,\n      },\n    },\n  };\n} else {\n  config = JSON.parse(JSON.stringify(raw));\n}\n\nconfig.clientName = config.clientName || 'Client';\nconst source = requireObject(config.source, 'source');\nif (source.type !== 'webhook') fail('source.type must be \"webhook\"');\nif (!isText(source.defaultSource)) fail('source.defaultSource must be a non-empty string');\nif (source.allowedSources !== undefined && !Array.isArray(source.allowedSources)) {\n  fail('source.allowedSources must be an array');\n}\nif (Array.isArray(source.allowedSources)) {\n  for (const item of source.allowedSources) {\n    if (!isText(item)) fail('source.allowedSources must contain only non-empty strings');\n  }\n}\n\nconst mapping = requireObject(config.mapping, 'mapping');\nfor (const field of ['name', 'email', 'phone', 'source', 'message', 'externalId']) {\n  requireText(mapping, field, `mapping.${field}`);\n}\n\nconst crm = requireObject(config.crm, 'crm');\nif (!['hubspot', 'google_sheets', 'none'].includes(crm.provider)) {\n  fail('crm.provider must be one of: hubspot, google_sheets, none');\n}\n\nconst leadFields = new Set(['name', 'firstName', 'lastName', 'email', 'phone', 'source', 'message', 'externalId']);\n\nif (crm.provider === 'hubspot') {\n  const hubspot = requireObject(crm.hubspot, 'crm.hubspot');\n  if (!isText(hubspot.baseUrl)) {\n    fail('crm.hubspot.baseUrl must be a non-empty string');\n  } else if (!/^https?:\\/\\/[^\\s/]+/i.test(hubspot.baseUrl)) {\n    fail('crm.hubspot.baseUrl must be a valid http(s) URL');\n  }\n  if ((hubspot.phoneOnlyPolicy || 'skip') !== 'skip') {\n    fail('crm.hubspot.phoneOnlyPolicy currently supports only \"skip\"');\n  }\n  if (hubspot.searchEmailProperty !== undefined && !isText(hubspot.searchEmailProperty)) {\n    fail('crm.hubspot.searchEmailProperty must be a non-empty string');\n  }\n  const searchLimit = Number(hubspot.searchLimit || 10);\n  if (!Number.isInteger(searchLimit) || searchLimit < 1 || searchLimit > 100) {\n    fail('crm.hubspot.searchLimit must be an integer between 1 and 100');\n  }\n  if (hubspot.propertiesToReturn !== undefined) {\n    if (!Array.isArray(hubspot.propertiesToReturn) || hubspot.propertiesToReturn.some((item) => !isText(item))) {\n      fail('crm.hubspot.propertiesToReturn must be an array of non-empty strings');\n    }\n  }\n  const propertyMapping = requireObject(hubspot.propertyMapping, 'crm.hubspot.propertyMapping');\n  const entries = Object.entries(propertyMapping);\n  if (entries.length === 0) fail('crm.hubspot.propertyMapping must contain at least one property');\n  for (const [destination, sourceField] of entries) {\n    if (!isText(destination)) fail('crm.hubspot.propertyMapping contains an empty destination property');\n    if (!isText(sourceField) || !leadFields.has(sourceField)) {\n      fail(`crm.hubspot.propertyMapping.${destination} must reference a valid Lead field`);\n    }\n  }\n  if (!isText(propertyMapping.email)) {\n    fail('crm.hubspot.propertyMapping.email is required for contact deduplication');\n  }\n}\n\nif (crm.provider === 'google_sheets') {\n  const sheets = requireObject(crm.googleSheets, 'crm.googleSheets');\n  requireText(sheets, 'spreadsheetId', 'crm.googleSheets.spreadsheetId');\n  requireText(sheets, 'leadsSheetName', 'crm.googleSheets.leadsSheetName');\n  const columns = requireObject(sheets.columns, 'crm.googleSheets.columns');\n  if (!isText(columns.name)) fail('crm.googleSheets.columns.name must be a non-empty string');\n  if (!isText(columns.email) && !isText(columns.phone)) {\n    fail('crm.googleSheets.columns must include email or phone');\n  }\n}\n\nconst journal = config.journal === undefined ? { enabled: false } : requireObject(config.journal, 'journal');\njournal.enabled = Boolean(journal.enabled);\nif (journal.enabled) {\n  if (journal.provider !== 'google_sheets') fail('journal.provider must be \"google_sheets\"');\n  const journalSheets = requireSheets(journal.googleSheets, 'journal.googleSheets');\n  if (crm.provider === 'google_sheets') {\n    const crmSheets = crm.googleSheets || {};\n    if (crmSheets.spreadsheetId === journalSheets.spreadsheetId && crmSheets.leadsSheetName === journalSheets.sheetName) {\n      fail('journal must target a different sheet than crm.googleSheets when CRM is Google Sheets');\n    }\n  }\n}\n\nconst notifications = config.notifications === undefined ? { enabled: false } : requireObject(config.notifications, 'notifications');\nnotifications.enabled = Boolean(notifications.enabled);\nif (notifications.enabled) {\n  if (!Array.isArray(notifications.channels) || notifications.channels.length === 0) {\n    fail('notifications.channels must contain at least one channel when notifications are enabled');\n  }\n  for (const channel of notifications.channels || []) {\n    if (channel !== 'telegram') fail(`unsupported notification channel: ${channel}`);\n  }\n  if ((notifications.channels || []).includes('telegram')) {\n    const telegram = requireObject(notifications.telegram, 'notifications.telegram');\n    requireText(telegram, 'chatId', 'notifications.telegram.chatId');\n    if (!isText(telegram.messageTemplate)) {\n      fail('notifications.telegram.messageTemplate must be a non-empty string');\n    } else {\n      const allowed = new Set(['name', 'firstName', 'lastName', 'email', 'phone', 'source', 'message', 'externalId', 'requestId', 'crmStatus', 'crmProvider', 'crmContactId']);\n      const placeholders = [...telegram.messageTemplate.matchAll(/\\{\\{\\s*(\\w+)\\s*\\}\\}/g)].map((match) => match[1]);\n      for (const placeholder of placeholders) {\n        if (!allowed.has(placeholder)) fail(`notifications.telegram.messageTemplate contains unknown placeholder {{${placeholder}}}`);\n      }\n    }\n  }\n}\n\nconst errors = config.errors === undefined ? { enabled: false } : requireObject(config.errors, 'errors');\nerrors.enabled = Boolean(errors.enabled);\nif (errors.enabled) {\n  if (errors.provider !== 'google_sheets') fail('errors.provider must be \"google_sheets\"');\n  const errorSheets = requireObject(errors.googleSheets, 'errors.googleSheets');\n  requireText(errorSheets, 'spreadsheetId', 'errors.googleSheets.spreadsheetId');\n  requireText(errorSheets, 'sheetName', 'errors.googleSheets.sheetName');\n  const errorColumns = requireObject(errorSheets.columns, 'errors.googleSheets.columns');\n  for (const field of ['createdAt', 'requestId', 'stage', 'error']) {\n    if (!isText(errorColumns[field])) fail(`errors.googleSheets.columns.${field} must be a non-empty string`);\n  }\n}\n\nif (crm.provider === 'none' && !journal.enabled) {\n  fail('at least one persistence target is required: crm.provider or journal.enabled');\n}\n\nconfig.version = 2;\nconfig.source = source;\nconfig.source.allowedSources = Array.isArray(source.allowedSources) ? source.allowedSources : [];\nconfig.crm = crm;\nconfig.journal = journal;\nconfig.notifications = notifications;\nconfig.errors = errors;\n\nif (config.crm.provider === 'hubspot') {\n  const hubspot = config.crm.hubspot;\n  hubspot.baseUrl = hubspot.baseUrl.replace(/\\/+$/, '');\n  hubspot.phoneOnlyPolicy = 'skip';\n  hubspot.searchEmailProperty = hubspot.searchEmailProperty || 'email';\n  delete hubspot.searchPhoneProperty;\n  hubspot.searchLimit = Number(hubspot.searchLimit || 10);\n  hubspot.propertiesToReturn = Array.isArray(hubspot.propertiesToReturn)\n    ? hubspot.propertiesToReturn\n    : ['email', 'phone', 'firstname', 'lastname'];\n}\n\nif (failures.length > 0) {\n  throw new Error(`Invalid client config: ${failures.join('; ')}`);\n}\n\nreturn [{ json: { config } }];"
+        "jsCode": "const raw = $input.first().json.config;\n\nif (!raw || typeof raw !== 'object' || Array.isArray(raw)) {\n  throw new Error('Client config must be a JSON object');\n}\n\nconst failures = [];\nconst isObject = (value) => Boolean(value) && typeof value === 'object' && !Array.isArray(value);\nconst isText = (value) => typeof value === 'string' && value.trim().length > 0;\nconst fail = (message) => failures.push(message);\nconst requireObject = (value, path) => {\n  if (!isObject(value)) {\n    fail(`${path} must be an object`);\n    return {};\n  }\n  return value;\n};\nconst requireText = (object, key, path) => {\n  if (!isText(object[key])) fail(`${path} must be a non-empty string`);\n};\nconst requireSheets = (value, path) => {\n  const sheets = requireObject(value, path);\n  requireText(sheets, 'spreadsheetId', `${path}.spreadsheetId`);\n  requireText(sheets, 'sheetName', `${path}.sheetName`);\n  const columns = requireObject(sheets.columns, `${path}.columns`);\n  if (!isText(columns.name)) fail(`${path}.columns.name must be a non-empty string`);\n  if (!isText(columns.email) && !isText(columns.phone)) {\n    fail(`${path}.columns must include email or phone`);\n  }\n  return sheets;\n};\n\nconst legacy = !raw.version || Number(raw.version) < 2;\nlet config;\n\nif (legacy) {\n  const oldSheets = requireObject(raw.googleSheets, 'googleSheets');\n  config = {\n    version: 2,\n    clientName: raw.clientName || 'Client',\n    timezone: raw.timezone || 'UTC',\n    source: {\n      type: 'webhook',\n      defaultSource: (raw.defaults && raw.defaults.source) || 'unknown',\n      allowedSources: [],\n    },\n    mapping: raw.mapping,\n    crm: {\n      provider: 'google_sheets',\n      googleSheets: {\n        spreadsheetId: oldSheets.spreadsheetId,\n        leadsSheetName: oldSheets.leadsSheetName,\n        columns: oldSheets.columns,\n      },\n    },\n    journal: { enabled: false },\n    notifications: {\n      enabled: true,\n      channels: ['telegram'],\n      telegram: raw.telegram,\n    },\n    errors: {\n      enabled: true,\n      provider: 'google_sheets',\n      googleSheets: {\n        spreadsheetId: oldSheets.spreadsheetId,\n        sheetName: oldSheets.errorsSheetName,\n        columns: oldSheets.errorColumns,\n      },\n    },\n  };\n} else {\n  config = JSON.parse(JSON.stringify(raw));\n}\n\nconfig.clientName = config.clientName || 'Client';\nconfig.timezone = config.timezone || 'UTC';\nif (!isText(config.timezone)) {\n  fail('timezone must be a non-empty IANA timezone string');\n} else {\n  try {\n    new Intl.DateTimeFormat('en-US', { timeZone: config.timezone }).format(new Date());\n  } catch (error) {\n    fail('timezone must be a valid IANA timezone');\n  }\n}\nconst source = requireObject(config.source, 'source');\nif (source.type !== 'webhook') fail('source.type must be \"webhook\"');\nif (!isText(source.defaultSource)) fail('source.defaultSource must be a non-empty string');\nif (source.allowedSources !== undefined && !Array.isArray(source.allowedSources)) {\n  fail('source.allowedSources must be an array');\n}\nif (Array.isArray(source.allowedSources)) {\n  for (const item of source.allowedSources) {\n    if (!isText(item)) fail('source.allowedSources must contain only non-empty strings');\n  }\n}\n\nconst mapping = requireObject(config.mapping, 'mapping');\nfor (const field of ['name', 'email', 'phone', 'source', 'message', 'externalId']) {\n  requireText(mapping, field, `mapping.${field}`);\n}\n\nconst crm = requireObject(config.crm, 'crm');\nif (!['hubspot', 'google_sheets', 'none'].includes(crm.provider)) {\n  fail('crm.provider must be one of: hubspot, google_sheets, none');\n}\n\nconst leadFields = new Set(['name', 'firstName', 'lastName', 'email', 'phone', 'source', 'message', 'externalId']);\n\nif (crm.provider === 'hubspot') {\n  const hubspot = requireObject(crm.hubspot, 'crm.hubspot');\n  if (!isText(hubspot.baseUrl)) {\n    fail('crm.hubspot.baseUrl must be a non-empty string');\n  } else if (!/^https?:\\/\\/[^\\s/]+/i.test(hubspot.baseUrl)) {\n    fail('crm.hubspot.baseUrl must be a valid http(s) URL');\n  }\n  if ((hubspot.phoneOnlyPolicy || 'skip') !== 'skip') {\n    fail('crm.hubspot.phoneOnlyPolicy currently supports only \"skip\"');\n  }\n  if (hubspot.searchEmailProperty !== undefined && !isText(hubspot.searchEmailProperty)) {\n    fail('crm.hubspot.searchEmailProperty must be a non-empty string');\n  }\n  const searchLimit = Number(hubspot.searchLimit || 10);\n  if (!Number.isInteger(searchLimit) || searchLimit < 1 || searchLimit > 100) {\n    fail('crm.hubspot.searchLimit must be an integer between 1 and 100');\n  }\n  if (hubspot.propertiesToReturn !== undefined) {\n    if (!Array.isArray(hubspot.propertiesToReturn) || hubspot.propertiesToReturn.some((item) => !isText(item))) {\n      fail('crm.hubspot.propertiesToReturn must be an array of non-empty strings');\n    }\n  }\n  const propertyMapping = requireObject(hubspot.propertyMapping, 'crm.hubspot.propertyMapping');\n  const entries = Object.entries(propertyMapping);\n  if (entries.length === 0) fail('crm.hubspot.propertyMapping must contain at least one property');\n  for (const [destination, sourceField] of entries) {\n    if (!isText(destination)) fail('crm.hubspot.propertyMapping contains an empty destination property');\n    if (!isText(sourceField) || !leadFields.has(sourceField)) {\n      fail(`crm.hubspot.propertyMapping.${destination} must reference a valid Lead field`);\n    }\n  }\n  if (!isText(propertyMapping.email)) {\n    fail('crm.hubspot.propertyMapping.email is required for contact deduplication');\n  }\n}\n\nif (crm.provider === 'google_sheets') {\n  const sheets = requireObject(crm.googleSheets, 'crm.googleSheets');\n  requireText(sheets, 'spreadsheetId', 'crm.googleSheets.spreadsheetId');\n  requireText(sheets, 'leadsSheetName', 'crm.googleSheets.leadsSheetName');\n  const columns = requireObject(sheets.columns, 'crm.googleSheets.columns');\n  if (!isText(columns.name)) fail('crm.googleSheets.columns.name must be a non-empty string');\n  if (!isText(columns.email) && !isText(columns.phone)) {\n    fail('crm.googleSheets.columns must include email or phone');\n  }\n}\n\nconst journal = config.journal === undefined ? { enabled: false } : requireObject(config.journal, 'journal');\njournal.enabled = Boolean(journal.enabled);\nif (journal.enabled) {\n  if (journal.provider !== 'google_sheets') fail('journal.provider must be \"google_sheets\"');\n  const journalSheets = requireSheets(journal.googleSheets, 'journal.googleSheets');\n  if (crm.provider === 'google_sheets') {\n    const crmSheets = crm.googleSheets || {};\n    if (crmSheets.spreadsheetId === journalSheets.spreadsheetId && crmSheets.leadsSheetName === journalSheets.sheetName) {\n      fail('journal must target a different sheet than crm.googleSheets when CRM is Google Sheets');\n    }\n  }\n}\n\nconst notifications = config.notifications === undefined ? { enabled: false } : requireObject(config.notifications, 'notifications');\nnotifications.enabled = Boolean(notifications.enabled);\nif (notifications.enabled) {\n  if (!Array.isArray(notifications.channels) || notifications.channels.length === 0) {\n    fail('notifications.channels must contain at least one channel when notifications are enabled');\n  }\n  for (const channel of notifications.channels || []) {\n    if (channel !== 'telegram') fail(`unsupported notification channel: ${channel}`);\n  }\n  if ((notifications.channels || []).includes('telegram')) {\n    const telegram = requireObject(notifications.telegram, 'notifications.telegram');\n    requireText(telegram, 'chatId', 'notifications.telegram.chatId');\n    if (!isText(telegram.messageTemplate)) {\n      fail('notifications.telegram.messageTemplate must be a non-empty string');\n    } else {\n      const allowed = new Set(['name', 'firstName', 'lastName', 'email', 'phone', 'source', 'message', 'externalId', 'requestId', 'createdAt', 'crmStatus', 'crmProvider', 'crmContactId']);\n      const placeholders = [...telegram.messageTemplate.matchAll(/\\{\\{\\s*(\\w+)\\s*\\}\\}/g)].map((match) => match[1]);\n      for (const placeholder of placeholders) {\n        if (!allowed.has(placeholder)) fail(`notifications.telegram.messageTemplate contains unknown placeholder {{${placeholder}}}`);\n      }\n    }\n  }\n}\n\nconst errors = config.errors === undefined ? { enabled: false } : requireObject(config.errors, 'errors');\nerrors.enabled = Boolean(errors.enabled);\nif (errors.enabled) {\n  if (errors.provider !== 'google_sheets') fail('errors.provider must be \"google_sheets\"');\n  const errorSheets = requireObject(errors.googleSheets, 'errors.googleSheets');\n  requireText(errorSheets, 'spreadsheetId', 'errors.googleSheets.spreadsheetId');\n  requireText(errorSheets, 'sheetName', 'errors.googleSheets.sheetName');\n  const errorColumns = requireObject(errorSheets.columns, 'errors.googleSheets.columns');\n  for (const field of ['createdAt', 'requestId', 'stage', 'error']) {\n    if (!isText(errorColumns[field])) fail(`errors.googleSheets.columns.${field} must be a non-empty string`);\n  }\n}\n\nif (crm.provider === 'none' && !journal.enabled) {\n  fail('at least one persistence target is required: crm.provider or journal.enabled');\n}\n\nconfig.version = 2;\nconfig.source = source;\nconfig.source.allowedSources = Array.isArray(source.allowedSources) ? source.allowedSources : [];\nconfig.crm = crm;\nconfig.journal = journal;\nconfig.notifications = notifications;\nconfig.errors = errors;\n\nif (config.crm.provider === 'hubspot') {\n  const hubspot = config.crm.hubspot;\n  hubspot.baseUrl = hubspot.baseUrl.replace(/\\/+$/, '');\n  hubspot.phoneOnlyPolicy = 'skip';\n  hubspot.searchEmailProperty = hubspot.searchEmailProperty || 'email';\n  delete hubspot.searchPhoneProperty;\n  hubspot.searchLimit = Number(hubspot.searchLimit || 10);\n  hubspot.propertiesToReturn = Array.isArray(hubspot.propertiesToReturn)\n    ? hubspot.propertiesToReturn\n    : ['email', 'phone', 'firstname', 'lastname'];\n}\n\nif (failures.length > 0) {\n  throw new Error(`Invalid client config: ${failures.join('; ')}`);\n}\n\nreturn [{ json: { config } }];"
       },
-      "id": "bf77f300-d780-4164-a157-88b98e5e603c",
+      "id": "dfc0ea53-2f20-48a7-a244-44070ac6bda0",
       "name": "Validate Client Config",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -70,9 +70,9 @@
     {
       "parameters": {
         "mode": "runOnceForAllItems",
-        "jsCode": "const config = $('Validate Client Config').first().json.config;\nconst rawBody = $('Lead Webhook').first().json.body;\nconst bodyIsObject = rawBody !== null && typeof rawBody === 'object' && !Array.isArray(rawBody);\nconst payload = bodyIsObject ? rawBody : {};\n\nconst mapping = config.mapping;\nconst getByPath = (obj, path) => {\n  if (typeof path !== 'string' || path.length === 0) return undefined;\n  return path.split('.').reduce((acc, key) => (acc === null || acc === undefined ? undefined : acc[key]), obj);\n};\nconst asText = (value) => {\n  if (value === null || value === undefined) return null;\n  if (typeof value === 'string') {\n    const trimmed = value.trim();\n    return trimmed.length > 0 ? trimmed : null;\n  }\n  if (typeof value === 'number' || typeof value === 'boolean') return String(value);\n  return null;\n};\n\nconst name = asText(getByPath(payload, mapping.name));\nconst emailRaw = asText(getByPath(payload, mapping.email));\nconst phoneRaw = asText(getByPath(payload, mapping.phone));\nconst sourceRaw = asText(getByPath(payload, mapping.source));\nconst phoneDigits = phoneRaw ? phoneRaw.replace(/\\D/g, '') : '';\nconst phone = phoneDigits.length > 0\n  ? (phoneRaw.trim().startsWith('+') ? '+' : '') + phoneDigits\n  : null;\nconst nameParts = name ? name.split(/\\s+/) : [];\nconst firstName = nameParts.length > 0 ? nameParts[0] : null;\nconst lastName = nameParts.length > 1 ? nameParts.slice(1).join(' ') : null;\n\nconst allowedSources = Array.isArray(config.source.allowedSources)\n  ? config.source.allowedSources.map((item) => item.toLowerCase())\n  : [];\nconst sourceValue = sourceRaw ? sourceRaw.toLowerCase() : null;\nconst source = sourceValue && (allowedSources.length === 0 || allowedSources.includes(sourceValue))\n  ? sourceValue\n  : (config.source.defaultSource || 'unknown').toLowerCase();\nconst sourceAdjusted = Boolean(sourceRaw && sourceValue !== source);\nconst requestId = $execution && $execution.id ? String($execution.id) : null;\nconst receivedAt = new Date().toISOString();\n\nreturn [{\n  json: {\n    lead: {\n      name,\n      firstName,\n      lastName,\n      email: emailRaw ? emailRaw.toLowerCase() : null,\n      phone,\n      source,\n      message: asText(getByPath(payload, mapping.message)),\n      externalId: asText(getByPath(payload, mapping.externalId)),\n    },\n    meta: { requestId, receivedAt, bodyIsObject, sourceAdjusted },\n    config,\n  },\n}];"
+        "jsCode": "const config = $('Validate Client Config').first().json.config;\nconst rawBody = $('Lead Webhook').first().json.body;\nconst bodyIsObject = rawBody !== null && typeof rawBody === 'object' && !Array.isArray(rawBody);\nconst payload = bodyIsObject ? rawBody : {};\n\nconst mapping = config.mapping;\nconst getByPath = (obj, path) => {\n  if (typeof path !== 'string' || path.length === 0) return undefined;\n  return path.split('.').reduce((acc, key) => (acc === null || acc === undefined ? undefined : acc[key]), obj);\n};\nconst asText = (value) => {\n  if (value === null || value === undefined) return null;\n  if (typeof value === 'string') {\n    const trimmed = value.trim();\n    return trimmed.length > 0 ? trimmed : null;\n  }\n  if (typeof value === 'number' || typeof value === 'boolean') return String(value);\n  return null;\n};\n\nconst name = asText(getByPath(payload, mapping.name));\nconst emailRaw = asText(getByPath(payload, mapping.email));\nconst phoneRaw = asText(getByPath(payload, mapping.phone));\nconst sourceRaw = asText(getByPath(payload, mapping.source));\nconst phoneDigits = phoneRaw ? phoneRaw.replace(/\\D/g, '') : '';\nconst phone = phoneDigits.length > 0\n  ? (phoneRaw.trim().startsWith('+') ? '+' : '') + phoneDigits\n  : null;\nconst nameParts = name ? name.split(/\\s+/) : [];\nconst firstName = nameParts.length > 0 ? nameParts[0] : null;\nconst lastName = nameParts.length > 1 ? nameParts.slice(1).join(' ') : null;\n\nconst allowedSources = Array.isArray(config.source.allowedSources)\n  ? config.source.allowedSources.map((item) => item.toLowerCase())\n  : [];\nconst sourceValue = sourceRaw ? sourceRaw.toLowerCase() : null;\nconst source = sourceValue && (allowedSources.length === 0 || allowedSources.includes(sourceValue))\n  ? sourceValue\n  : (config.source.defaultSource || 'unknown').toLowerCase();\nconst sourceAdjusted = Boolean(sourceRaw && sourceValue !== source);\nconst requestId = $execution && $execution.id ? String($execution.id) : null;\nconst receivedAt = new Date().toISOString();\nconst formatInTimezone = (iso, timeZone) => {\n  try {\n    return new Intl.DateTimeFormat('sv-SE', {\n      timeZone,\n      year: 'numeric',\n      month: '2-digit',\n      day: '2-digit',\n      hour: '2-digit',\n      minute: '2-digit',\n      second: '2-digit',\n      hour12: false,\n    }).format(new Date(iso));\n  } catch (error) {\n    return iso;\n  }\n};\nconst displayReceivedAt = formatInTimezone(receivedAt, config.timezone || 'UTC');\n\nreturn [{\n  json: {\n    lead: {\n      name,\n      firstName,\n      lastName,\n      email: emailRaw ? emailRaw.toLowerCase() : null,\n      phone,\n      source,\n      message: asText(getByPath(payload, mapping.message)),\n      externalId: asText(getByPath(payload, mapping.externalId)),\n    },\n    meta: { requestId, receivedAt, displayReceivedAt, timezone: config.timezone || 'UTC', bodyIsObject, sourceAdjusted },\n    config,\n  },\n}];"
       },
-      "id": "baabf730-ab21-4365-8d2a-de3b09cb8cb9",
+      "id": "da261551-dcc4-4c69-a618-65d287822f5d",
       "name": "Normalize Lead",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -87,7 +87,7 @@
         "mode": "runOnceForAllItems",
         "jsCode": "const { lead, meta, config } = $input.first().json;\nconst errors = [];\n\nif (!meta.bodyIsObject) errors.push('Request body must be a JSON object.');\nif (!lead.name) errors.push('name is required.');\nif (!lead.email && !lead.phone) errors.push('At least one of email or phone is required.');\n\nreturn [{\n  json: {\n    lead,\n    meta,\n    config,\n    validation: { valid: errors.length === 0, errors },\n  },\n}];"
       },
-      "id": "8f39f503-9c82-4960-be4a-905591e6ba0a",
+      "id": "20a819ad-47ac-461a-abd0-9b2cffbe59d3",
       "name": "Validate Lead",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -107,7 +107,7 @@
           },
           "conditions": [
             {
-              "id": "465bf70c-ec2c-4f15-9d9f-5bfe7e91090f",
+              "id": "fb424493-9171-45d7-ad9c-612228c1b3e2",
               "leftValue": "={{ $json.validation.valid }}",
               "rightValue": "",
               "operator": {
@@ -121,7 +121,7 @@
         },
         "options": {}
       },
-      "id": "27aa457b-7509-45dc-93ba-622f5e686e09",
+      "id": "62c62b1e-2caf-4694-8466-3fbaab2aeb93",
       "name": "Lead Is Valid?",
       "type": "n8n-nodes-base.if",
       "typeVersion": 2.2,
@@ -135,7 +135,7 @@
         "mode": "runOnceForAllItems",
         "jsCode": "const validated = $('Validate Lead').first().json;\nreturn [{ json: { response: { ok: false, error: 'validation_error', message: 'Lead validation failed.', details: validated.validation.errors, requestId: validated.meta.requestId } } }];"
       },
-      "id": "b8d3f125-759b-41af-be00-24e84f041232",
+      "id": "b17e4717-50ac-4f52-8469-72ede36cb1b5",
       "name": "Build Validation Response",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -160,7 +160,7 @@
           }
         }
       },
-      "id": "582cf2d8-2946-49c7-9915-bb6936caafaf",
+      "id": "f15c54bf-06e1-4062-8bae-77cf1eb4c27f",
       "name": "Respond 400 Validation Error",
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1.5,
@@ -180,7 +180,7 @@
           },
           "conditions": [
             {
-              "id": "cdc011c9-2062-4ebe-a842-a496924c04ae",
+              "id": "8dfa6c9f-d0f4-4696-9719-3bfab374d6a4",
               "leftValue": "={{ $json.config.crm.provider === 'hubspot' }}",
               "rightValue": "",
               "operator": {
@@ -194,7 +194,7 @@
         },
         "options": {}
       },
-      "id": "9847a14b-9119-4566-9ebc-1869d876853c",
+      "id": "7ece7710-eff9-43a7-8633-e8c8a2b3c2df",
       "name": "CRM Provider Is HubSpot?",
       "type": "n8n-nodes-base.if",
       "typeVersion": 2.2,
@@ -214,7 +214,7 @@
           },
           "conditions": [
             {
-              "id": "df456cff-07d4-44b7-8074-a8bb2c68cd53",
+              "id": "7f7e6363-408f-4ca9-b8f9-b839266c0d26",
               "leftValue": "={{ $json.config.crm.provider === 'google_sheets' }}",
               "rightValue": "",
               "operator": {
@@ -228,7 +228,7 @@
         },
         "options": {}
       },
-      "id": "a105fc36-f83f-4149-a9fd-e5094f2ac284",
+      "id": "ac7e92d7-6de9-4549-a4af-18eceabfcc20",
       "name": "CRM Provider Is Google Sheets?",
       "type": "n8n-nodes-base.if",
       "typeVersion": 2.2,
@@ -242,7 +242,7 @@
         "mode": "runOnceForAllItems",
         "jsCode": "const validated = $('Validate Lead').first().json;\nconst config = $('Validate Client Config').first().json.config;\nconst crm = {\n  provider: 'none',\n  status: 'skipped',\n  contactId: null,\n  matchedBy: null,\n  matchCount: 0,\n  reason: 'crm_disabled',\n  httpStatus: 202,\n};\nreturn [{\n  json: {\n    lead: validated.lead,\n    meta: validated.meta,\n    config,\n    crm,\n    journal: null,\n    notifications: null,\n    warnings: [],\n    hasWarning: false,\n  },\n}];"
       },
-      "id": "15416a43-47e5-47b4-b576-cd8256efd57a",
+      "id": "bc915346-2982-45b3-ada6-8d90966e71ec",
       "name": "Build No CRM Result",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -254,9 +254,9 @@
     {
       "parameters": {
         "mode": "runOnceForAllItems",
-        "jsCode": "const validated = $('Validate Lead').first().json;\nconst config = $('Validate Client Config').first().json.config;\nconst columns = config.crm.googleSheets.columns;\nconst values = {\n  createdAt: validated.meta.receivedAt,\n  externalId: validated.lead.externalId,\n  name: validated.lead.name,\n  firstName: validated.lead.firstName,\n  lastName: validated.lead.lastName,\n  email: validated.lead.email,\n  phone: validated.lead.phone,\n  source: validated.lead.source,\n  message: validated.lead.message,\n  requestId: validated.meta.requestId,\n};\nconst row = {};\nfor (const [key, header] of Object.entries(columns)) {\n  if (typeof header !== 'string' || header.length === 0) continue;\n  row[header] = values[key] === null || values[key] === undefined ? '' : values[key];\n}\nif (Object.keys(row).length === 0) throw new Error('No Google Sheets CRM columns are configured');\nreturn [{ json: row }];"
+        "jsCode": "const validated = $('Validate Lead').first().json;\nconst config = $('Validate Client Config').first().json.config;\nconst columns = config.crm.googleSheets.columns;\nconst values = {\n  createdAt: validated.meta.displayReceivedAt || validated.meta.receivedAt,\n  externalId: validated.lead.externalId,\n  name: validated.lead.name,\n  firstName: validated.lead.firstName,\n  lastName: validated.lead.lastName,\n  email: validated.lead.email,\n  phone: validated.lead.phone,\n  source: validated.lead.source,\n  message: validated.lead.message,\n  requestId: validated.meta.requestId,\n};\nconst row = {};\nfor (const [key, header] of Object.entries(columns)) {\n  if (typeof header !== 'string' || header.length === 0) continue;\n  row[header] = values[key] === null || values[key] === undefined ? '' : values[key];\n}\nif (Object.keys(row).length === 0) throw new Error('No Google Sheets CRM columns are configured');\nreturn [{ json: row }];"
       },
-      "id": "308aa469-e9f3-4bb5-867a-f393638b9c42",
+      "id": "ea9ffc54-3c33-4310-8dae-73cfa0527163",
       "name": "Map CRM Sheet Row",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -293,7 +293,7 @@
           "cellFormat": "RAW"
         }
       },
-      "id": "c9f22198-fec9-4882-a5fe-b0706ae54b0a",
+      "id": "513e4537-096c-449e-a75a-2d71e4e0e90b",
       "name": "CRM Adapter - Google Sheets",
       "type": "n8n-nodes-base.googleSheets",
       "typeVersion": 4.7,
@@ -311,7 +311,7 @@
         "mode": "runOnceForAllItems",
         "jsCode": "const validated = $('Validate Lead').first().json;\nconst config = $('Validate Client Config').first().json.config;\nconst crm = {\n  provider: 'google_sheets',\n  status: 'created',\n  contactId: null,\n  matchedBy: null,\n  matchCount: 0,\n  reason: null,\n  httpStatus: 201,\n};\nreturn [{\n  json: {\n    lead: validated.lead,\n    meta: validated.meta,\n    config,\n    crm,\n    journal: null,\n    notifications: null,\n    warnings: [],\n    hasWarning: false,\n  },\n}];"
       },
-      "id": "6be838ff-9edb-4172-b4b5-740750bec435",
+      "id": "15edde6d-e032-44fc-92aa-bb0132f7d7eb",
       "name": "Normalize Google Sheets CRM Result",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -325,7 +325,7 @@
         "mode": "runOnceForAllItems",
         "jsCode": "const validated = $('Validate Lead').first().json;\nconst config = $('Validate Client Config').first().json.config;\nconst hubspot = config.crm.hubspot;\nconst lead = validated.lead;\n\nconst contactProperties = {};\nfor (const [destination, sourceField] of Object.entries(hubspot.propertyMapping)) {\n  const value = lead[sourceField];\n  if (value !== null && value !== undefined && String(value).trim() !== '') {\n    contactProperties[destination] = String(value);\n  }\n}\n\nlet action = 'search';\nlet reason = null;\nlet matchedBy = 'email';\nlet searchProperty = hubspot.searchEmailProperty;\nlet searchValue = lead.email;\n\nif (!lead.email) {\n  action = 'skip';\n  reason = 'phone_only';\n  matchedBy = null;\n  searchValue = null;\n}\n\nconst requestBody = action === 'search'\n  ? {\n      filterGroups: [{ filters: [{ propertyName: searchProperty, operator: 'EQ', value: searchValue }] }],\n      properties: hubspot.propertiesToReturn,\n      limit: hubspot.searchLimit,\n    }\n  : null;\n\nreturn [{\n  json: {\n    lead,\n    meta: validated.meta,\n    config,\n    action,\n    reason,\n    matchedBy,\n    searchProperty,\n    searchValue,\n    contactProperties,\n    requestBody,\n  },\n}];"
       },
-      "id": "43a28c3c-31e4-4733-b1a3-df4ab96fae27",
+      "id": "b217050f-0a40-43b0-bfc9-6215fcef531c",
       "name": "Prepare HubSpot Contact",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -345,7 +345,7 @@
           },
           "conditions": [
             {
-              "id": "0493d7c6-5ec8-4543-9efa-788268f81868",
+              "id": "9faa6bc1-9409-4639-a013-339a4b36cec9",
               "leftValue": "={{ $json.action === 'search' }}",
               "rightValue": "",
               "operator": {
@@ -359,7 +359,7 @@
         },
         "options": {}
       },
-      "id": "b2ae90a4-6a7b-4bf0-993d-0c3d96e06d16",
+      "id": "1cc71b91-ec3b-4fe5-b887-bb07131b8c6c",
       "name": "HubSpot Search Needed?",
       "type": "n8n-nodes-base.if",
       "typeVersion": 2.2,
@@ -379,7 +379,7 @@
         "jsonBody": "={{ $json.requestBody }}",
         "options": {}
       },
-      "id": "3901a7e8-8843-467b-830f-6f2a67666893",
+      "id": "eca2242f-cf71-4a8b-9919-795d4823652f",
       "name": "HubSpot Search Contact",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.5,
@@ -397,7 +397,7 @@
         "mode": "runOnceForAllItems",
         "jsCode": "const response = $input.first().json;\nconst prepared = $('Prepare HubSpot Contact').first().json;\nconst results = Array.isArray(response)\n  ? response\n  : (Array.isArray(response.results) ? response.results : []);\nconst matchCount = results.length;\n\nlet action = 'create';\nlet reason = null;\nlet contactId = null;\n\nif (matchCount === 1) {\n  action = 'update';\n  contactId = String(results[0].id ?? results[0].vid ?? '');\n} else if (matchCount > 1) {\n  action = 'skip';\n  reason = 'ambiguous_match';\n}\n\nreturn [{\n  json: {\n    ...prepared,\n    action,\n    reason,\n    contactId,\n    matchCount,\n    requestBody: { properties: prepared.contactProperties },\n    searchResult: results[0] || null,\n  },\n}];"
       },
-      "id": "6499d886-357f-40ad-ba26-758e9fb088c0",
+      "id": "2273a69f-7317-4fb7-99c2-0491928642be",
       "name": "Resolve HubSpot Match",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -417,7 +417,7 @@
           },
           "conditions": [
             {
-              "id": "a1f8587a-0f88-46e7-9017-ecd2b026fef6",
+              "id": "c0cc84e0-37f3-48c4-92c5-f0a14293e5bd",
               "leftValue": "={{ $json.action === 'create' || $json.action === 'update' }}",
               "rightValue": "",
               "operator": {
@@ -431,7 +431,7 @@
         },
         "options": {}
       },
-      "id": "3c39c595-ca22-4d34-b014-19a3ea2180f0",
+      "id": "f5a8b3e4-9543-4c4c-bf57-3781d93dedc5",
       "name": "HubSpot Can Upsert?",
       "type": "n8n-nodes-base.if",
       "typeVersion": 2.2,
@@ -451,7 +451,7 @@
           },
           "conditions": [
             {
-              "id": "a3809c28-d8ec-4d58-b66e-8d634464eeca",
+              "id": "a911565e-d991-4424-a12e-ffb7aa5c1851",
               "leftValue": "={{ $json.action === 'update' }}",
               "rightValue": "",
               "operator": {
@@ -465,7 +465,7 @@
         },
         "options": {}
       },
-      "id": "0d565554-fe56-4980-bad1-c024a69bb9f4",
+      "id": "57ba2b15-7bae-40e1-b359-2a7b065a5cee",
       "name": "HubSpot Action Is Update?",
       "type": "n8n-nodes-base.if",
       "typeVersion": 2.2,
@@ -485,7 +485,7 @@
         "jsonBody": "={{ $json.requestBody }}",
         "options": {}
       },
-      "id": "292d7f02-7814-486c-98ec-f05e8769081c",
+      "id": "3deccf23-2f2b-4d90-9119-e992043b075c",
       "name": "HubSpot Create Contact",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.5,
@@ -509,7 +509,7 @@
         "jsonBody": "={{ $json.requestBody }}",
         "options": {}
       },
-      "id": "497b03c4-8421-4485-a8a1-aa2c5cfbc137",
+      "id": "9fa2fcfc-9eb3-4139-be97-c60ff985e03c",
       "name": "HubSpot Update Contact",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.5,
@@ -527,7 +527,7 @@
         "mode": "runOnceForAllItems",
         "jsCode": "const response = $input.first().json;\nconst prepared = $('Resolve HubSpot Match').first().json;\nconst status = prepared.action === 'update' ? 'updated' : 'created';\nconst contactId = String(response.id ?? response.vid ?? prepared.contactId ?? '');\nconst crm = {\n  provider: 'hubspot',\n  status,\n  contactId,\n  matchedBy: prepared.matchedBy,\n  matchCount: prepared.matchCount,\n  reason: null,\n  httpStatus: status === 'created' ? 201 : 200,\n};\nreturn [{\n  json: {\n    lead: prepared.lead,\n    meta: prepared.meta,\n    config: prepared.config,\n    crm,\n    journal: null,\n    notifications: null,\n    warnings: [],\n    hasWarning: false,\n  },\n}];"
       },
-      "id": "7536cdcf-f166-4d5e-b6e3-0ce5840aa848",
+      "id": "af6b59bc-2677-4bae-9bee-43b2f1443573",
       "name": "Normalize HubSpot Result",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -541,7 +541,7 @@
         "mode": "runOnceForAllItems",
         "jsCode": "const data = $input.first().json;\nconst reason = data.reason || (data.matchCount > 1 ? 'ambiguous_match' : 'skipped');\nconst crm = {\n  provider: 'hubspot',\n  status: 'skipped',\n  contactId: data.contactId || null,\n  matchedBy: data.matchedBy || null,\n  matchCount: data.matchCount || 0,\n  reason,\n  httpStatus: 202,\n};\nreturn [{\n  json: {\n    lead: data.lead,\n    meta: data.meta,\n    config: data.config,\n    crm,\n    journal: null,\n    notifications: null,\n    warnings: [],\n    hasWarning: false,\n  },\n}];"
       },
-      "id": "bdb5d442-65be-494c-9e5d-1e542019ba16",
+      "id": "0ce704eb-cee6-4a31-800a-e2c256191dc9",
       "name": "Build HubSpot Skipped Result",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -555,7 +555,7 @@
         "mode": "runOnceForAllItems",
         "jsCode": "const input = $input.first().json;\nconst config = $('Validate Client Config').first().json.config;\nconst validated = $('Validate Lead').first().json;\nconst rawError = input.error;\nconst detail = typeof rawError === 'string'\n  ? rawError\n  : (rawError && (rawError.message || rawError.description)) || input.message || 'CRM request failed';\nconst rateLimited = /(^|\\D)429(\\D|$)|rate limit|too many requests|spacing your requests|batching settings/i.test(String(detail));\nconst provider = config.crm.provider;\nconst crm = {\n  provider,\n  status: 'failed',\n  contactId: null,\n  matchedBy: null,\n  matchCount: 0,\n  reason: rateLimited ? 'rate_limited' : 'api_error',\n  httpStatus: rateLimited ? 429 : 502,\n  error: String(detail).slice(0, 2000),\n};\nconst response = {\n  ok: false,\n  error: rateLimited ? 'crm_rate_limited' : 'crm_write_failed',\n  message: rateLimited ? 'CRM rate limit reached. Retry later.' : 'Lead was not saved to the CRM.',\n  saved: false,\n  notified: false,\n  requestId: validated.meta.requestId,\n  externalId: validated.lead.externalId,\n  crm: { provider, status: 'failed', reason: crm.reason },\n};\nreturn [{\n  json: {\n    lead: validated.lead,\n    meta: validated.meta,\n    config,\n    crm,\n    response,\n    httpStatus: crm.httpStatus,\n    hasWarning: false,\n  },\n}];"
       },
-      "id": "bd7021cf-1c11-49ca-865f-d303aea1dd0a",
+      "id": "fa49e24b-e677-4694-8434-39838e061bf6",
       "name": "Build CRM Failure",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -575,7 +575,7 @@
           },
           "conditions": [
             {
-              "id": "79de9f7e-5271-4986-aa7e-094fe655bf19",
+              "id": "32cb7e55-e63f-49d6-85e1-de2df6d9be6c",
               "leftValue": "={{ $json.config.errors.enabled }}",
               "rightValue": "",
               "operator": {
@@ -589,7 +589,7 @@
         },
         "options": {}
       },
-      "id": "b3006d69-2ae3-4856-a231-7d1056623bbb",
+      "id": "8b37e7c7-0b8e-404d-9bbd-1891ed00071c",
       "name": "Errors Enabled?",
       "type": "n8n-nodes-base.if",
       "typeVersion": 2.2,
@@ -601,9 +601,9 @@
     {
       "parameters": {
         "mode": "runOnceForAllItems",
-        "jsCode": "const context = $('Build CRM Failure').first().json;\nconst config = context.config;\nconst columns = config.errors.googleSheets.columns;\nconst values = {\n  createdAt: new Date().toISOString(),\n  requestId: context.meta.requestId,\n  stage: `crm_${context.crm.provider}`,\n  error: context.crm.error || 'CRM request failed',\n  leadJson: JSON.stringify(context.lead).slice(0, 4000),\n  executionId: $execution && $execution.id ? String($execution.id) : '',\n};\nconst row = {};\nfor (const [key, header] of Object.entries(columns)) {\n  if (typeof header !== 'string' || header.length === 0) continue;\n  if (values[key] !== undefined && values[key] !== null) row[header] = values[key];\n}\nif (Object.keys(row).length === 0) throw new Error('No Google Sheets error columns are configured');\nreturn [{ json: row }];"
+        "jsCode": "const context = $('Build CRM Failure').first().json;\nconst config = context.config;\nconst columns = config.errors.googleSheets.columns;\nconst formatInTimezone = (iso, timeZone) => {\n  try {\n    return new Intl.DateTimeFormat('sv-SE', {\n      timeZone,\n      year: 'numeric', month: '2-digit', day: '2-digit',\n      hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,\n    }).format(new Date(iso));\n  } catch (error) {\n    return iso;\n  }\n};\nconst values = {\n  createdAt: formatInTimezone(new Date().toISOString(), context.config.timezone || 'UTC'),\n  requestId: context.meta.requestId,\n  stage: `crm_${context.crm.provider}`,\n  error: context.crm.error || 'CRM request failed',\n  leadJson: JSON.stringify(context.lead).slice(0, 4000),\n  executionId: $execution && $execution.id ? String($execution.id) : '',\n};\nconst row = {};\nfor (const [key, header] of Object.entries(columns)) {\n  if (typeof header !== 'string' || header.length === 0) continue;\n  if (values[key] !== undefined && values[key] !== null) row[header] = values[key];\n}\nif (Object.keys(row).length === 0) throw new Error('No Google Sheets error columns are configured');\nreturn [{ json: row }];"
       },
-      "id": "d7f2e9aa-9581-4f4e-8362-99a8bbef2eee",
+      "id": "d488e7dc-66f3-4794-aaa5-214f8b3efd6c",
       "name": "Map Error Log Row",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -639,7 +639,7 @@
           "cellFormat": "RAW"
         }
       },
-      "id": "29f9aaa2-b5ee-4388-be99-747539eaf820",
+      "id": "b48c7330-592b-4b3b-ac6e-eaf97f952121",
       "name": "Error Log Adapter - Google Sheets",
       "type": "n8n-nodes-base.googleSheets",
       "typeVersion": 4.7,
@@ -668,7 +668,7 @@
           }
         }
       },
-      "id": "4530ceb8-eb6f-457c-8db3-7d40dbfeeb40",
+      "id": "1a2b31d1-dc04-41e4-a796-357eb42d5cb0",
       "name": "Respond CRM Failure",
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1.5,
@@ -682,7 +682,7 @@
         "errorType": "errorMessage",
         "errorMessage": "={{ 'Lead intake integration failure. See execution ' + $execution.id + '.' }}"
       },
-      "id": "0ea0c4b1-0a30-47bd-91bd-a318f1c8abd7",
+      "id": "a97b7295-6c69-4646-abfa-96c19990c4ef",
       "name": "Stop With Integration Error",
       "type": "n8n-nodes-base.stopAndError",
       "typeVersion": 1,
@@ -696,7 +696,7 @@
         "mode": "runOnceForAllItems",
         "jsCode": "return [{ json: $input.first().json }];"
       },
-      "id": "02736ee4-e5a5-4235-83d0-ad699c3334f6",
+      "id": "2c23c1a6-5655-44d5-ad8d-e844479eb49c",
       "name": "Build Journal Context",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -716,7 +716,7 @@
           },
           "conditions": [
             {
-              "id": "eae506a5-af9d-40ce-98cc-6f87a3f5ce49",
+              "id": "2cc4fa26-4bc1-4f0b-934d-41462c8678cf",
               "leftValue": "={{ $json.config.journal.enabled }}",
               "rightValue": "",
               "operator": {
@@ -730,7 +730,7 @@
         },
         "options": {}
       },
-      "id": "7e6bf760-5207-4933-8ecc-26f644b5a6a5",
+      "id": "ef3c4cee-d924-427d-9b04-6d7563d5d225",
       "name": "Journal Enabled?",
       "type": "n8n-nodes-base.if",
       "typeVersion": 2.2,
@@ -742,9 +742,9 @@
     {
       "parameters": {
         "mode": "runOnceForAllItems",
-        "jsCode": "const context = $input.first().json;\nconst config = context.config;\nconst columns = config.journal.googleSheets.columns;\nconst values = {\n  createdAt: context.meta.receivedAt,\n  externalId: context.lead.externalId,\n  name: context.lead.name,\n  firstName: context.lead.firstName,\n  lastName: context.lead.lastName,\n  email: context.lead.email,\n  phone: context.lead.phone,\n  source: context.lead.source,\n  message: context.lead.message,\n  requestId: context.meta.requestId,\n  crmProvider: context.crm.provider,\n  crmStatus: context.crm.status,\n  crmContactId: context.crm.contactId,\n};\nconst row = {};\nfor (const [key, header] of Object.entries(columns)) {\n  if (typeof header !== 'string' || header.length === 0) continue;\n  row[header] = values[key] === null || values[key] === undefined ? '' : values[key];\n}\nif (Object.keys(row).length === 0) throw new Error('No Google Sheets journal columns are configured');\nreturn [{ json: row }];"
+        "jsCode": "const context = $input.first().json;\nconst config = context.config;\nconst columns = config.journal.googleSheets.columns;\nconst values = {\n  createdAt: context.meta.displayReceivedAt || context.meta.receivedAt,\n  externalId: context.lead.externalId,\n  name: context.lead.name,\n  firstName: context.lead.firstName,\n  lastName: context.lead.lastName,\n  email: context.lead.email,\n  phone: context.lead.phone,\n  source: context.lead.source,\n  message: context.lead.message,\n  requestId: context.meta.requestId,\n  crmProvider: context.crm.provider,\n  crmStatus: context.crm.status,\n  crmContactId: context.crm.contactId,\n};\nconst row = {};\nfor (const [key, header] of Object.entries(columns)) {\n  if (typeof header !== 'string' || header.length === 0) continue;\n  row[header] = values[key] === null || values[key] === undefined ? '' : values[key];\n}\nif (Object.keys(row).length === 0) throw new Error('No Google Sheets journal columns are configured');\nreturn [{ json: row }];"
       },
-      "id": "34f33569-0330-4dd1-82d0-870271c86387",
+      "id": "5b32e561-dac9-42ff-94be-8a0d51fce984",
       "name": "Map Journal Row",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -780,7 +780,7 @@
           "cellFormat": "RAW"
         }
       },
-      "id": "6bd4a90f-f4fd-482d-8804-f829b4445c0f",
+      "id": "4437ccda-3dfd-4819-a2af-d689c6a3ab82",
       "name": "Journal Adapter - Google Sheets",
       "type": "n8n-nodes-base.googleSheets",
       "typeVersion": 4.7,
@@ -798,7 +798,7 @@
         "mode": "runOnceForAllItems",
         "jsCode": "const context = $('Build Journal Context').first().json;\nreturn [{\n  json: {\n    ...context,\n    journal: { enabled: true, status: 'saved' },\n    hasWarning: Boolean(context.hasWarning),\n  },\n}];"
       },
-      "id": "a2d4dd8c-c1ae-4e41-9e6e-4230fce80e97",
+      "id": "2b6a8373-8e8e-4f7d-be59-452b9cc1ba6a",
       "name": "Build Journal Saved",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -812,7 +812,7 @@
         "mode": "runOnceForAllItems",
         "jsCode": "const context = $('Build Journal Context').first().json;\nconst input = $input.first().json;\nconst rawError = input.error;\nconst detail = typeof rawError === 'string'\n  ? rawError\n  : (rawError && (rawError.message || rawError.description)) || input.message || 'Google Sheets journal write failed';\nreturn [{\n  json: {\n    ...context,\n    journal: { enabled: true, status: 'failed', error: String(detail).slice(0, 1000) },\n    warnings: [...(context.warnings || []), 'journal_write_failed'],\n    hasWarning: true,\n  },\n}];"
       },
-      "id": "384ec85e-c71f-43e6-b8e0-31c2b12d8106",
+      "id": "39d73189-f725-4082-a812-6d9d31a5dfcb",
       "name": "Build Journal Warning",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -826,7 +826,7 @@
         "mode": "runOnceForAllItems",
         "jsCode": "const context = $input.first().json;\nreturn [{\n  json: {\n    ...context,\n    journal: { enabled: false, status: 'disabled' },\n    hasWarning: Boolean(context.hasWarning),\n  },\n}];"
       },
-      "id": "03a2fc24-6520-4b56-84d8-69ac192c3ed8",
+      "id": "8147272b-6238-463a-a998-1568d5ba2e51",
       "name": "Build Journal Disabled",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -846,7 +846,7 @@
           },
           "conditions": [
             {
-              "id": "e8080d7f-2d47-4072-9522-b2064f364ae1",
+              "id": "fd5a528a-a599-4a88-aad3-8f442a3504e3",
               "leftValue": "={{ $json.config.notifications.enabled }}",
               "rightValue": "",
               "operator": {
@@ -860,7 +860,7 @@
         },
         "options": {}
       },
-      "id": "917c9c5e-b923-4de7-9b80-d2c55c6d7d42",
+      "id": "4f877089-1e47-440f-abf6-5005b54847d6",
       "name": "Notifications Enabled?",
       "type": "n8n-nodes-base.if",
       "typeVersion": 2.2,
@@ -872,9 +872,9 @@
     {
       "parameters": {
         "mode": "runOnceForAllItems",
-        "jsCode": "const context = $input.first().json;\nconst config = context.config;\nconst telegram = config.notifications.telegram;\nconst escapeHtml = (value) => String(value)\n  .replace(/&/g, '&amp;')\n  .replace(/</g, '&lt;')\n  .replace(/>/g, '&gt;')\n  .replace(/\"/g, '&quot;');\nconst values = {\n  name: escapeHtml(context.lead.name || '-'),\n  firstName: escapeHtml(context.lead.firstName || '-'),\n  lastName: escapeHtml(context.lead.lastName || '-'),\n  email: escapeHtml(context.lead.email || '-'),\n  phone: escapeHtml(context.lead.phone || '-'),\n  source: escapeHtml(context.lead.source || '-'),\n  message: escapeHtml(context.lead.message || '-'),\n  externalId: escapeHtml(context.lead.externalId || '-'),\n  requestId: escapeHtml(context.meta.requestId || '-'),\n  crmStatus: escapeHtml(context.crm.status || '-'),\n  crmProvider: escapeHtml(context.crm.provider || '-'),\n  crmContactId: escapeHtml(context.crm.contactId || '-'),\n};\nlet text = String(telegram.messageTemplate);\nfor (const [key, value] of Object.entries(values)) {\n  const pattern = new RegExp(`\\\\{\\\\{\\\\s*${key}\\\\s*\\\\}\\\\}`, 'g');\n  text = text.replace(pattern, () => value);\n}\nif (text.length > 4000) {\n  text = `${text.slice(0, 3980).replace(/&[a-zA-Z#0-9]*$/, '')}\\n[truncated]`;\n}\nreturn [{ json: { ...context, text } }];"
+        "jsCode": "const context = $input.first().json;\nconst config = context.config;\nconst telegram = config.notifications.telegram;\nconst escapeHtml = (value) => String(value)\n  .replace(/&/g, '&amp;')\n  .replace(/</g, '&lt;')\n  .replace(/>/g, '&gt;')\n  .replace(/\"/g, '&quot;');\nconst values = {\n  name: escapeHtml(context.lead.name || '-'),\n  firstName: escapeHtml(context.lead.firstName || '-'),\n  lastName: escapeHtml(context.lead.lastName || '-'),\n  email: escapeHtml(context.lead.email || '-'),\n  phone: escapeHtml(context.lead.phone || '-'),\n  source: escapeHtml(context.lead.source || '-'),\n  message: escapeHtml(context.lead.message || '-'),\n  externalId: escapeHtml(context.lead.externalId || '-'),\n  requestId: escapeHtml(context.meta.requestId || '-'),\n  createdAt: escapeHtml(context.meta.displayReceivedAt || context.meta.receivedAt || '-'),\n  crmStatus: escapeHtml(context.crm.status || '-'),\n  crmProvider: escapeHtml(context.crm.provider || '-'),\n  crmContactId: escapeHtml(context.crm.contactId || '-'),\n};\nlet text = String(telegram.messageTemplate);\nfor (const [key, value] of Object.entries(values)) {\n  const pattern = new RegExp(`\\\\{\\\\{\\\\s*${key}\\\\s*\\\\}\\\\}`, 'g');\n  text = text.replace(pattern, () => value);\n}\nif (text.length > 4000) {\n  text = `${text.slice(0, 3980).replace(/&[a-zA-Z#0-9]*$/, '')}\\n[truncated]`;\n}\nreturn [{ json: { ...context, text } }];"
       },
-      "id": "25583a08-6416-42a3-8bf3-c9639f4f21e2",
+      "id": "fccaa3b6-ab7c-4fef-bc22-9aa803f27f90",
       "name": "Build Notification Message",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -889,7 +889,7 @@
         "mode": "runOnceForAllItems",
         "jsCode": "const context = $('Build Journal Context').first().json;\nconst input = $input.first().json;\nconst rawError = input.error;\nconst detail = typeof rawError === 'string'\n  ? rawError\n  : (rawError && (rawError.message || rawError.description)) || input.message || 'Notification message build failed';\nreturn [{\n  json: {\n    ...context,\n    notifications: {\n      enabled: true,\n      status: 'failed',\n      channels: context.config.notifications.channels,\n      error: String(detail).slice(0, 1000),\n    },\n    warnings: [...(context.warnings || []), 'notification_send_failed'],\n    hasWarning: true,\n  },\n}];"
       },
-      "id": "da9a94cc-7b30-40c4-80de-bc8fc578be4c",
+      "id": "84295cda-ceb5-4579-a443-64aea1ecd4aa",
       "name": "Build Notification Message Failure",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -909,7 +909,7 @@
           "appendAttribution": false
         }
       },
-      "id": "b82aa0ef-6e5d-4cb0-838a-afa40d5e4e61",
+      "id": "04945e13-5f23-46a6-9f48-d70ce5e4cb5a",
       "name": "Notification Adapter - Telegram",
       "type": "n8n-nodes-base.telegram",
       "typeVersion": 1.2,
@@ -927,7 +927,7 @@
         "mode": "runOnceForAllItems",
         "jsCode": "const context = $('Build Notification Message').first().json;\nreturn [{\n  json: {\n    ...context,\n    notifications: {\n      enabled: true,\n      status: 'sent',\n      channels: context.config.notifications.channels,\n    },\n    hasWarning: Boolean(context.hasWarning),\n  },\n}];"
       },
-      "id": "e1ed1a17-1053-47fd-89c9-9d090873fe33",
+      "id": "a0602633-efc5-4c74-86e7-f32addc50332",
       "name": "Build Notifications Sent",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -941,7 +941,7 @@
         "mode": "runOnceForAllItems",
         "jsCode": "const context = $('Build Notification Message').first().json;\nconst input = $input.first().json;\nconst rawError = input.error;\nconst detail = typeof rawError === 'string'\n  ? rawError\n  : (rawError && (rawError.message || rawError.description)) || input.message || 'Telegram send failed';\nreturn [{\n  json: {\n    ...context,\n    notifications: {\n      enabled: true,\n      status: 'failed',\n      channels: context.config.notifications.channels,\n      error: String(detail).slice(0, 1000),\n    },\n    warnings: [...(context.warnings || []), 'notification_send_failed'],\n    hasWarning: true,\n  },\n}];"
       },
-      "id": "889844ea-66ba-4b60-949a-8621ef778929",
+      "id": "957f9ea3-25a3-4a33-b6ca-6359e1b455fc",
       "name": "Build Notification Warning",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -955,7 +955,7 @@
         "mode": "runOnceForAllItems",
         "jsCode": "const context = $input.first().json;\nreturn [{\n  json: {\n    ...context,\n    notifications: { enabled: false, status: 'disabled', channels: [] },\n    hasWarning: Boolean(context.hasWarning),\n  },\n}];"
       },
-      "id": "ced7a972-b4d8-405f-ae7c-6491311a8123",
+      "id": "ffe606ec-4607-487e-9003-cf9f58b36b26",
       "name": "Build Notifications Disabled",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -967,9 +967,9 @@
     {
       "parameters": {
         "mode": "runOnceForAllItems",
-        "jsCode": "const context = $input.first().json;\nconst { lead, meta, crm, config } = context;\nconst journal = context.journal || { enabled: false, status: 'disabled' };\nconst notifications = context.notifications || { enabled: false, status: 'disabled', channels: [] };\nconst warnings = Array.isArray(context.warnings) ? [...context.warnings] : [];\nconst saved = ['created', 'updated'].includes(crm.status) || journal.status === 'saved';\nconst notified = notifications.status === 'sent';\nlet status = crm.status;\nif (crm.status === 'skipped') status = 'crm_skipped';\nif (notifications.status === 'failed') {\n  if (crm.status === 'created') status = 'saved_with_notification_error';\n  else if (crm.status === 'updated') status = 'updated_with_notification_error';\n  else if (crm.status === 'skipped') status = 'crm_skipped_with_notification_error';\n}\nconst httpStatus = crm.httpStatus || (crm.status === 'updated' ? 200 : crm.status === 'skipped' ? 202 : 201);\nconst response = {\n  ok: crm.status !== 'failed',\n  status,\n  requestId: meta.requestId,\n  externalId: lead.externalId,\n  saved,\n  notified,\n  crm: {\n    provider: crm.provider,\n    status: crm.status,\n    contactId: crm.contactId || null,\n    matchedBy: crm.matchedBy || null,\n    matchCount: crm.matchCount || 0,\n    reason: crm.reason || null,\n  },\n  journal: { enabled: journal.enabled, status: journal.status },\n  notifications: {\n    enabled: notifications.enabled,\n    status: notifications.status,\n    channels: notifications.channels || [],\n  },\n  warnings,\n};\nreturn [{ json: { response, httpStatus, hasWarning: Boolean(context.hasWarning) } }];"
+        "jsCode": "const context = $input.first().json;\nconst { lead, meta, crm, config } = context;\nconst journal = context.journal || { enabled: false, status: 'disabled' };\nconst notifications = context.notifications || { enabled: false, status: 'disabled', channels: [] };\nconst warnings = Array.isArray(context.warnings) ? [...context.warnings] : [];\nconst saved = ['created', 'updated'].includes(crm.status) || journal.status === 'saved';\nconst notified = notifications.status === 'sent';\nlet status = crm.status;\nif (crm.status === 'skipped') status = 'crm_skipped';\nif (notifications.status === 'failed') {\n  if (crm.status === 'created') status = 'saved_with_notification_error';\n  else if (crm.status === 'updated') status = 'updated_with_notification_error';\n  else if (crm.status === 'skipped') status = 'crm_skipped_with_notification_error';\n}\nconst httpStatus = crm.httpStatus || (crm.status === 'updated' ? 200 : crm.status === 'skipped' ? 202 : 201);\nconst response = {\n  ok: crm.status !== 'failed',\n  status,\n  requestId: meta.requestId,\n  externalId: lead.externalId,\n  receivedAt: meta.receivedAt,\n  displayTime: meta.displayReceivedAt,\n  saved,\n  notified,\n  crm: {\n    provider: crm.provider,\n    status: crm.status,\n    contactId: crm.contactId || null,\n    matchedBy: crm.matchedBy || null,\n    matchCount: crm.matchCount || 0,\n    reason: crm.reason || null,\n  },\n  journal: { enabled: journal.enabled, status: journal.status },\n  notifications: {\n    enabled: notifications.enabled,\n    status: notifications.status,\n    channels: notifications.channels || [],\n  },\n  warnings,\n};\nreturn [{ json: { response, httpStatus, hasWarning: Boolean(context.hasWarning) } }];"
       },
-      "id": "d8e6b0ee-029e-41df-8688-865ab8a5ddc6",
+      "id": "966f35e5-e6d4-408d-ab91-2c5e9e74139d",
       "name": "Build Response",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -994,7 +994,7 @@
           }
         }
       },
-      "id": "f9731103-5fec-4c84-aa57-195080e802b4",
+      "id": "ab8fd005-ee23-43c7-b217-dbf4bad18833",
       "name": "Respond Lead Intake",
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1.5,
@@ -1014,7 +1014,7 @@
           },
           "conditions": [
             {
-              "id": "33653b8c-5d6d-495c-94ad-8b5dfe557c29",
+              "id": "6758213e-47c2-4686-bb7a-0f34aff35ab2",
               "leftValue": "={{ $json.hasWarning }}",
               "rightValue": "",
               "operator": {
@@ -1028,7 +1028,7 @@
         },
         "options": {}
       },
-      "id": "2a2f649a-714e-4d04-8dd1-04cb9e904889",
+      "id": "5541616b-6539-4293-b078-af870632f16f",
       "name": "Has Warning?",
       "type": "n8n-nodes-base.if",
       "typeVersion": 2.2,
@@ -1042,7 +1042,7 @@
         "errorType": "errorMessage",
         "errorMessage": "={{ 'Lead accepted with partial integration failure. See execution ' + $execution.id + '.' }}"
       },
-      "id": "5ce9f3f4-3b36-4713-872e-c63727b6d316",
+      "id": "f1b8286d-d5ac-4c5d-b97c-ac3883b4af7b",
       "name": "Stop With Partial Error",
       "type": "n8n-nodes-base.stopAndError",
       "typeVersion": 1,
@@ -1056,7 +1056,7 @@
         "mode": "runOnceForAllItems",
         "jsCode": "const input = $input.first().json;\nconst rawError = input.error;\nconst detail = typeof rawError === 'string'\n  ? rawError\n  : (rawError && (rawError.message || rawError.description)) || input.message || 'Configuration error';\nconst requestId = $execution && $execution.id ? String($execution.id) : null;\nreturn [{\n  json: {\n    response: {\n      ok: false,\n      error: 'configuration_error',\n      message: 'Lead intake is not configured correctly or the request could not be normalized.',\n      detail: String(detail).slice(0, 800),\n      requestId,\n    },\n  },\n}];"
       },
-      "id": "1df48f15-784c-4ac3-b8d7-22ed72df8b7f",
+      "id": "5588ca32-dbce-479c-aa7b-a43346f121c3",
       "name": "Build Config Error Response",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -1081,7 +1081,7 @@
           }
         }
       },
-      "id": "d77951ad-1086-4f91-b5f2-c38f49f9892b",
+      "id": "f2e4057e-8325-4312-b9a7-5001a26d401b",
       "name": "Respond 500 Config Error",
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1.5,
@@ -1095,7 +1095,7 @@
         "errorType": "errorMessage",
         "errorMessage": "={{ 'Lead intake configuration error. See execution ' + $execution.id + '.' }}"
       },
-      "id": "5304059f-0295-40f5-913f-20a6602839c0",
+      "id": "4fe301d4-f9a4-4ee3-a94a-b9d2415942fc",
       "name": "Stop With Config Error",
       "type": "n8n-nodes-base.stopAndError",
       "typeVersion": 1,
@@ -1791,7 +1791,7 @@
     "saveDataErrorExecution": "all",
     "timezone": "UTC"
   },
-  "versionId": "92ed638e-4afd-4077-b9af-cb60c6affca9",
+  "versionId": "fb16f7ff-1273-414f-99c9-5ad957e38b75",
   "meta": {
     "templateCredsSetupCompleted": false
   },

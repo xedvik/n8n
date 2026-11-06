@@ -10,7 +10,7 @@ trap 'rm -rf "$TMP_DIR"' EXIT
 CONFIG="$TMP_DIR/client.json"
 
 CONFIG_FILE="$CONFIG" SETUP_NONINTERACTIVE=1 \
-CLIENT_NAME="Onboarding Test" SOURCE_DEFAULT="landing" \
+CLIENT_NAME="Onboarding Test" CLIENT_TIMEZONE="Asia/Tbilisi" SOURCE_DEFAULT="landing" \
 CRM_PROVIDER="google_sheets" GOOGLE_SHEETS_ID="sheet-onboarding-test" LEADS_SHEET="Leads" \
 JOURNAL_ENABLED=false TELEGRAM_ENABLED=false ERRORS_ENABLED=false \
 bash scripts/setup-client.sh >/dev/null
@@ -22,6 +22,7 @@ import sys
 config = json.load(open(sys.argv[1], encoding="utf-8"))
 assert config["version"] == 2
 assert config["clientName"] == "Onboarding Test"
+assert config["timezone"] == "Asia/Tbilisi"
 assert config["crm"]["provider"] == "google_sheets"
 assert config["crm"]["googleSheets"]["spreadsheetId"] == "sheet-onboarding-test"
 assert config["journal"]["enabled"] is False
@@ -29,7 +30,7 @@ assert config["notifications"]["enabled"] is False
 print("PASS: setup-client created and validated a new client config")
 PY
 
-CONFIG_FILE="$CONFIG" SETUP_NONINTERACTIVE=1 \
+CONFIG_FILE="$CONFIG" SETUP_NONINTERACTIVE=1 CLIENT_TIMEZONE="Asia/Tbilisi" \
 CRM_PROVIDER="google_sheets" GOOGLE_SHEETS_ID="sheet-onboarding-test" LEADS_SHEET="Leads" \
 JOURNAL_ENABLED=false TELEGRAM_ENABLED=false ERRORS_ENABLED=false \
 bash scripts/setup-client.sh >/dev/null
@@ -40,6 +41,7 @@ import json
 import sys
 config = json.load(open(sys.argv[1], encoding="utf-8"))
 assert config["clientName"] == "Onboarding Test"
+assert config["timezone"] == "Asia/Tbilisi"
 assert config["crm"]["googleSheets"]["spreadsheetId"] == "sheet-onboarding-test"
 print("PASS: setup-client rerun preserved existing settings")
 PY
