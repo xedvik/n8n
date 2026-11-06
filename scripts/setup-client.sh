@@ -16,15 +16,15 @@ NORMALIZED_FILE="$TMP_DIR/normalized.json"
 trap 'rm -rf "$TMP_DIR"; rm -f "$NEW_FILE"' EXIT
 
 fail() {
-  echo "ERROR: $*" >&2
+  echo "ОШИБКА: $*" >&2
   exit 1
 }
 
 need_value() {
   local name="$1" value="$2"
-  [ -n "$value" ] || fail "$name is required"
+  [ -n "$value" ] || fail "$name: значение обязательно"
   case "$value" in
-    REPLACE_WITH_*|CHANGE_ME*) fail "$name still contains a placeholder value" ;;
+    REPLACE_WITH_*|CHANGE_ME*) fail "$name: значение всё ещё является placeholder (замените его)" ;;
   esac
 }
 
@@ -40,16 +40,16 @@ normalize_or_validate() {
     docker compose exec -T n8n rm -f /tmp/setup-config.json >/dev/null 2>&1 || true
     return
   fi
-  fail "Node.js is not installed and the n8n container is not running. Start Docker Compose or install Node.js."
+  fail "Node.js не установлен, и контейнер n8n не запущен. Запустите Docker Compose или установите Node.js."
 }
 
 if [ -f "$CONFIG_FILE" ]; then
-  normalize_or_validate "$CONFIG_FILE" "$NORMALIZED_FILE" || fail "Existing $CONFIG_FILE is invalid; fix it before rerunning setup."
+  normalize_or_validate "$CONFIG_FILE" "$NORMALIZED_FILE" || fail "Существующий $CONFIG_FILE невалиден; исправьте его перед повторным запуском setup."
   cp "$NORMALIZED_FILE" "$BASE_FILE"
-  echo "Using existing config: $CONFIG_FILE"
+  echo "Использую существующий конфиг: $CONFIG_FILE"
 else
   cp "$TEMPLATE_FILE" "$BASE_FILE"
-  echo "Using template: $TEMPLATE_FILE"
+  echo "Использую шаблон: $TEMPLATE_FILE"
 fi
 
 json_get() {
@@ -96,7 +96,7 @@ ask_yn() {
       value="${value:-$default}"
       case "$value" in
         y|Y|yes|YES|1|true|TRUE|n|N|no|NO|0|false|FALSE) break ;;
-        *) echo "Please answer y or n." ;;
+        *) echo "Пожалуйста, ответьте y или n." ;;
       esac
     done
   fi
@@ -106,39 +106,39 @@ ask_yn() {
   esac
 }
 
-client_name="$(ask 'Client name' "$(json_get clientName)" CLIENT_NAME)"
-source_default="$(ask 'Default lead source' "$(json_get source.defaultSource)" SOURCE_DEFAULT)"
-crm_provider="$(ask 'CRM provider (hubspot/google_sheets/none)' "$(json_get crm.provider)" CRM_PROVIDER)"
+client_name="$(ask 'Имя клиента' "$(json_get clientName)" CLIENT_NAME)"
+source_default="$(ask 'Источник заявки по умолчанию' "$(json_get source.defaultSource)" SOURCE_DEFAULT)"
+crm_provider="$(ask 'CRM-провайдер (hubspot/google_sheets/none)' "$(json_get crm.provider)" CRM_PROVIDER)"
 case "$crm_provider" in
   hubspot|google_sheets|none) ;;
-  *) fail "CRM provider must be hubspot, google_sheets or none" ;;
+  *) fail "CRM-провайдер должен быть hubspot, google_sheets или none" ;;
 esac
 
 sheet_id="$(json_get crm.googleSheets.spreadsheetId)"
 leads_sheet="$(json_get crm.googleSheets.leadsSheetName)"
 hubspot_base="$(json_get crm.hubspot.baseUrl)"
 if [ "$crm_provider" = "google_sheets" ]; then
-  sheet_id="$(ask 'CRM Google Sheets spreadsheet ID' "$sheet_id" GOOGLE_SHEETS_ID)"
-  leads_sheet="$(ask 'CRM leads sheet name' "${leads_sheet:-Leads}" LEADS_SHEET)"
-  need_value "CRM spreadsheet ID" "$sheet_id"
-  need_value "CRM leads sheet" "$leads_sheet"
+  sheet_id="$(ask 'ID Google-таблицы CRM' "$sheet_id" GOOGLE_SHEETS_ID)"
+  leads_sheet="$(ask 'Имя листа с заявками CRM' "${leads_sheet:-Leads}" LEADS_SHEET)"
+  need_value "ID Google-таблицы CRM" "$sheet_id"
+  need_value "Имя листа CRM" "$leads_sheet"
 fi
 if [ "$crm_provider" = "hubspot" ]; then
-  hubspot_base="$(ask 'HubSpot API base URL' "${hubspot_base:-https://api.hubapi.com}" HUBSPOT_BASE_URL)"
+  hubspot_base="$(ask 'Базовый URL HubSpot API' "${hubspot_base:-https://api.hubapi.com}" HUBSPOT_BASE_URL)"
 fi
 
-journal_enabled="$(ask_yn 'Enable independent Google Sheets journal?' "$(json_get journal.enabled)" JOURNAL_ENABLED)"
+journal_enabled="$(ask_yn 'Включить отдельный журнал Google Sheets?' "$(json_get journal.enabled)" JOURNAL_ENABLED)"
 journal_id="$(json_get journal.googleSheets.spreadsheetId)"
 journal_sheet="$(json_get journal.googleSheets.sheetName)"
 if [ "$journal_enabled" = "true" ]; then
   journal_default_id="${journal_id:-$sheet_id}"
-  journal_id="$(ask 'Journal spreadsheet ID' "$journal_default_id" JOURNAL_SHEET_ID)"
-  journal_sheet="$(ask 'Journal sheet name' "${journal_sheet:-Journal}" JOURNAL_SHEET)"
-  need_value "Journal spreadsheet ID" "$journal_id"
-  need_value "Journal sheet name" "$journal_sheet"
+  journal_id="$(ask 'ID Google-таблицы журнала' "$journal_default_id" JOURNAL_SHEET_ID)"
+  journal_sheet="$(ask 'Имя листа журнала' "${journal_sheet:-Journal}" JOURNAL_SHEET)"
+  need_value "ID Google-таблицы журнала" "$journal_id"
+  need_value "Имя листа журнала" "$journal_sheet"
 fi
 
-notifications_enabled="$(ask_yn 'Enable Telegram notifications?' "$(json_get notifications.enabled)" TELEGRAM_ENABLED)"
+notifications_enabled="$(ask_yn 'Включить уведомления Telegram?' "$(json_get notifications.enabled)" TELEGRAM_ENABLED)"
 telegram_chat_id="$(json_get notifications.telegram.chatId)"
 telegram_template="$(json_get notifications.telegram.messageTemplate)"
 if [ "$notifications_enabled" = "true" ]; then
@@ -149,15 +149,15 @@ if [ "$notifications_enabled" = "true" ]; then
   fi
 fi
 
-errors_enabled="$(ask_yn 'Enable Google Sheets error log?' "$(json_get errors.enabled)" ERRORS_ENABLED)"
+errors_enabled="$(ask_yn 'Включить журнал ошибок Google Sheets?' "$(json_get errors.enabled)" ERRORS_ENABLED)"
 errors_id="$(json_get errors.googleSheets.spreadsheetId)"
 errors_sheet="$(json_get errors.googleSheets.sheetName)"
 if [ "$errors_enabled" = "true" ]; then
   errors_default_id="${errors_id:-${journal_id:-$sheet_id}}"
-  errors_id="$(ask 'Error log spreadsheet ID' "$errors_default_id" ERRORS_SHEET_ID)"
-  errors_sheet="$(ask 'Error log sheet name' "${errors_sheet:-Errors}" ERRORS_SHEET)"
-  need_value "Error log spreadsheet ID" "$errors_id"
-  need_value "Error log sheet name" "$errors_sheet"
+  errors_id="$(ask 'ID Google-таблицы журнала ошибок' "$errors_default_id" ERRORS_SHEET_ID)"
+  errors_sheet="$(ask 'Имя листа журнала ошибок' "${errors_sheet:-Errors}" ERRORS_SHEET)"
+  need_value "ID Google-таблицы журнала ошибок" "$errors_id"
+  need_value "Имя листа журнала ошибок" "$errors_sheet"
 fi
 
 CLIENT_NAME="$client_name" \
@@ -259,30 +259,30 @@ base["errors"] = errors
 Path(os.environ["OUTPUT_FILE"]).write_text(json.dumps(base, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 PY
 
-normalize_or_validate "$NEW_FILE" "$TMP_DIR/validated.json" || fail "Generated config is invalid; existing $CONFIG_FILE was not changed."
+normalize_or_validate "$NEW_FILE" "$TMP_DIR/validated.json" || fail "Сгенерированный конфиг невалиден; существующий $CONFIG_FILE не изменён."
 mv "$NEW_FILE" "$CONFIG_FILE"
 chmod 600 "$CONFIG_FILE" 2>/dev/null || true
 
 echo
-echo "Configuration written: $CONFIG_FILE"
-echo "Next: assign credentials in n8n (n8n does not store them in client.json)."
+echo "Конфигурация записана: $CONFIG_FILE"
+echo "Далее назначьте credentials в n8n (они не хранятся в client.json)."
 echo
-echo "Required credential hints:"
-echo "- Header Auth: header name X-Webhook-Secret; value from .env LEAD_WEBHOOK_SECRET; assign to Lead Webhook."
+echo "Подсказки по credentials:"
+echo "- Header Auth: имя заголовка X-Webhook-Secret; значение из .env LEAD_WEBHOOK_SECRET; назначить ноде Lead Webhook."
 if [ "$crm_provider" = "google_sheets" ] || [ "$journal_enabled" = "true" ] || [ "$errors_enabled" = "true" ]; then
-  echo "- Google Sheets OAuth2 API (or Google Service Account): assign to CRM, Journal and Error Log Google Sheets nodes."
+  echo "- Google Sheets OAuth2 API (или Google Service Account): назначить нодам CRM, Journal и Error Log."
 fi
 if [ "$crm_provider" = "hubspot" ]; then
-  echo "- HubSpot Service Key (OAuth2 optional): assign to HubSpot Search Contact, HubSpot Create Contact and HubSpot Update Contact."
+  echo "- HubSpot Service Key (OAuth2 опционально): назначить нодам HubSpot Search Contact, HubSpot Create Contact и HubSpot Update Contact."
 fi
 if [ "$notifications_enabled" = "true" ]; then
-  echo "- Telegram API: assign to Notification Adapter - Telegram."
+  echo "- Telegram API: назначить ноде Notification Adapter - Telegram."
 fi
 echo
 if [[ "$CONFIG_FILE" = /* ]]; then
-  echo "In .env set: LEAD_CONFIG_FILE=${CONFIG_FILE}"
+  echo "В .env укажите: LEAD_CONFIG_FILE=${CONFIG_FILE}"
 else
-  echo "In .env set: LEAD_CONFIG_FILE=./${CONFIG_FILE}"
+  echo "В .env укажите: LEAD_CONFIG_FILE=./${CONFIG_FILE}"
 fi
-echo "Then restart n8n: docker compose up -d"
-echo "Run: ./scripts/doctor.sh"
+echo "Затем перезапустите n8n: docker compose up -d"
+echo "Запустите: ./scripts/doctor.sh"
