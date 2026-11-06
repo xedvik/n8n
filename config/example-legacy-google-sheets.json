@@ -1,0 +1,41 @@
+{
+  "clientName": "Example Client",
+  "mapping": {
+    "name": "name",
+    "email": "email",
+    "phone": "phone",
+    "source": "source",
+    "message": "message",
+    "externalId": "external_id"
+  },
+  "defaults": {
+    "source": "unknown"
+  },
+  "googleSheets": {
+    "spreadsheetId": "REPLACE_WITH_SPREADSHEET_ID",
+    "leadsSheetName": "Leads",
+    "errorsSheetName": "Errors",
+    "columns": {
+      "createdAt": "Created At",
+      "externalId": "External ID",
+      "name": "Name",
+      "email": "Email",
+      "phone": "Phone",
+      "source": "Source",
+      "message": "Message",
+      "requestId": "Request ID"
+    },
+    "errorColumns": {
+      "createdAt": "Created At",
+      "requestId": "Request ID",
+      "stage": "Stage",
+      "error": "Error",
+      "leadJson": "Lead JSON",
+      "executionId": "Execution ID"
+    }
+  },
+  "telegram": {
+    "chatId": "REPLACE_WITH_CHAT_ID",
+    "messageTemplate": "New lead\n\nName: {{name}}\nEmail: {{email}}\nPhone: {{phone}}\nSource: {{source}}\nMessage: {{message}}\nExternal ID: {{externalId}}\nRequest ID: {{requestId}}"
+  }
+}

@@ -9,15 +9,15 @@
         "authentication": "headerAuth",
         "responseMode": "responseNode"
       },
-      "id": "0fd8d753-fe4e-4d9a-8365-1c63770d2feb",
+      "id": "52656f53-0881-42a5-b757-bad951493819",
       "name": "Lead Webhook",
       "type": "n8n-nodes-base.webhook",
       "typeVersion": 2.2,
       "position": [
-        -1040,
+        -2200,
         0
       ],
-      "webhookId": "ed1d218f-bb74-41d8-8bd0-b8b0864e24ca"
+      "webhookId": "f1e3d9a2-7b4c-4f5e-8a6d-2c1b0e9f7a33"
     },
     {
       "parameters": {
@@ -25,12 +25,12 @@
         "fileSelector": "/home/node/config/client.json",
         "options": {}
       },
-      "id": "b0f569e9-f670-4ca8-bc2f-e6c605f0bd26",
+      "id": "2225d0e9-f9ee-47d6-abf8-c2f9ca2666f9",
       "name": "Load Client Config",
       "type": "n8n-nodes-base.readWriteFile",
       "typeVersion": 1.1,
       "position": [
-        -820,
+        -1980,
         0
       ],
       "onError": "continueErrorOutput"
@@ -42,12 +42,12 @@
         "destinationKey": "config",
         "options": {}
       },
-      "id": "853eff25-16ce-4267-a1ff-83f2c6a90e6d",
+      "id": "b3218562-ae18-4cbe-a08b-6629ea95ff35",
       "name": "Parse Client Config",
       "type": "n8n-nodes-base.extractFromFile",
       "typeVersion": 1.2,
       "position": [
-        -600,
+        -1760,
         0
       ],
       "onError": "continueErrorOutput"
@@ -55,14 +55,14 @@
     {
       "parameters": {
         "mode": "runOnceForAllItems",
-        "jsCode": "const config = $input.first().json.config;\nconst failures = [];\nconst isNonEmptyString = (value) => typeof value === 'string' && value.trim().length > 0;\nconst requireObject = (value, path) => {\n  if (!value || typeof value !== 'object' || Array.isArray(value)) {\n    failures.push(`${path} must be an object`);\n    return {};\n  }\n  return value;\n};\n\nif (!config || typeof config !== 'object' || Array.isArray(config)) {\n  throw new Error('Client config must be a JSON object');\n}\n\nconst mapping = requireObject(config.mapping, 'mapping');\nfor (const field of ['name', 'email', 'phone', 'source', 'message', 'externalId']) {\n  if (!isNonEmptyString(mapping[field])) failures.push(`mapping.${field} must be a non-empty string`);\n}\nif (config.defaults !== undefined) {\n  const defaults = requireObject(config.defaults, 'defaults');\n  if (defaults.source !== undefined && typeof defaults.source !== 'string') {\n    failures.push('defaults.source must be a string');\n  }\n}\n\nconst sheets = requireObject(config.googleSheets, 'googleSheets');\nfor (const field of ['spreadsheetId', 'leadsSheetName', 'errorsSheetName']) {\n  if (!isNonEmptyString(sheets[field])) failures.push(`googleSheets.${field} must be a non-empty string`);\n}\nconst columns = requireObject(sheets.columns, 'googleSheets.columns');\nif (!isNonEmptyString(columns.name)) failures.push('googleSheets.columns.name must be a non-empty string');\nif (!isNonEmptyString(columns.email) && !isNonEmptyString(columns.phone)) {\n  failures.push('googleSheets.columns must include email or phone');\n}\nconst errorColumns = requireObject(sheets.errorColumns, 'googleSheets.errorColumns');\nfor (const field of ['createdAt', 'requestId', 'stage', 'error']) {\n  if (!isNonEmptyString(errorColumns[field])) failures.push(`googleSheets.errorColumns.${field} must be a non-empty string`);\n}\n\nconst telegram = requireObject(config.telegram, 'telegram');\nif (!isNonEmptyString(telegram.chatId)) failures.push('telegram.chatId must be a non-empty string');\nif (!isNonEmptyString(telegram.messageTemplate)) {\n  failures.push('telegram.messageTemplate must be a non-empty string');\n} else {\n  const allowedTemplateKeys = new Set(['name', 'email', 'phone', 'source', 'message', 'externalId', 'requestId']);\n  const placeholders = [...telegram.messageTemplate.matchAll(/\\{\\{\\s*(\\w+)\\s*\\}\\}/g)].map((match) => match[1]);\n  for (const key of placeholders) {\n    if (!allowedTemplateKeys.has(key)) failures.push(`telegram.messageTemplate contains unknown placeholder {{${key}}}`);\n  }\n}\n\nif (failures.length > 0) {\n  throw new Error(`Invalid client config: ${failures.join('; ')}`);\n}\n\nreturn [{ json: { config } }];"
+        "jsCode": "const raw = $input.first().json.config;\n\nif (!raw || typeof raw !== 'object' || Array.isArray(raw)) {\n  throw new Error('Client config must be a JSON object');\n}\n\nconst failures = [];\nconst isObject = (value) => Boolean(value) && typeof value === 'object' && !Array.isArray(value);\nconst isText = (value) => typeof value === 'string' && value.trim().length > 0;\nconst fail = (message) => failures.push(message);\nconst requireObject = (value, path) => {\n  if (!isObject(value)) {\n    fail(`${path} must be an object`);\n    return {};\n  }\n  return value;\n};\nconst requireText = (object, key, path) => {\n  if (!isText(object[key])) fail(`${path} must be a non-empty string`);\n};\nconst requireSheets = (value, path) => {\n  const sheets = requireObject(value, path);\n  requireText(sheets, 'spreadsheetId', `${path}.spreadsheetId`);\n  requireText(sheets, 'sheetName', `${path}.sheetName`);\n  const columns = requireObject(sheets.columns, `${path}.columns`);\n  if (!isText(columns.name)) fail(`${path}.columns.name must be a non-empty string`);\n  if (!isText(columns.email) && !isText(columns.phone)) {\n    fail(`${path}.columns must include email or phone`);\n  }\n  return sheets;\n};\n\nconst legacy = !raw.version || Number(raw.version) < 2;\nlet config;\n\nif (legacy) {\n  const oldSheets = requireObject(raw.googleSheets, 'googleSheets');\n  config = {\n    version: 2,\n    clientName: raw.clientName || 'Client',\n    source: {\n      type: 'webhook',\n      defaultSource: (raw.defaults && raw.defaults.source) || 'unknown',\n      allowedSources: [],\n    },\n    mapping: raw.mapping,\n    crm: {\n      provider: 'google_sheets',\n      googleSheets: {\n        spreadsheetId: oldSheets.spreadsheetId,\n        leadsSheetName: oldSheets.leadsSheetName,\n        columns: oldSheets.columns,\n      },\n    },\n    journal: { enabled: false },\n    notifications: {\n      enabled: true,\n      channels: ['telegram'],\n      telegram: raw.telegram,\n    },\n    errors: {\n      enabled: true,\n      provider: 'google_sheets',\n      googleSheets: {\n        spreadsheetId: oldSheets.spreadsheetId,\n        sheetName: oldSheets.errorsSheetName,\n        columns: oldSheets.errorColumns,\n      },\n    },\n  };\n} else {\n  config = JSON.parse(JSON.stringify(raw));\n}\n\nconfig.clientName = config.clientName || 'Client';\nconst source = requireObject(config.source, 'source');\nif (source.type !== 'webhook') fail('source.type must be \"webhook\"');\nif (!isText(source.defaultSource)) fail('source.defaultSource must be a non-empty string');\nif (source.allowedSources !== undefined && !Array.isArray(source.allowedSources)) {\n  fail('source.allowedSources must be an array');\n}\nif (Array.isArray(source.allowedSources)) {\n  for (const item of source.allowedSources) {\n    if (!isText(item)) fail('source.allowedSources must contain only non-empty strings');\n  }\n}\n\nconst mapping = requireObject(config.mapping, 'mapping');\nfor (const field of ['name', 'email', 'phone', 'source', 'message', 'externalId']) {\n  requireText(mapping, field, `mapping.${field}`);\n}\n\nconst crm = requireObject(config.crm, 'crm');\nif (!['hubspot', 'google_sheets', 'none'].includes(crm.provider)) {\n  fail('crm.provider must be one of: hubspot, google_sheets, none');\n}\n\nconst leadFields = new Set(['name', 'firstName', 'lastName', 'email', 'phone', 'source', 'message', 'externalId']);\n\nif (crm.provider === 'hubspot') {\n  const hubspot = requireObject(crm.hubspot, 'crm.hubspot');\n  if (!isText(hubspot.baseUrl)) {\n    fail('crm.hubspot.baseUrl must be a non-empty string');\n  } else if (!/^https?:\\/\\/[^\\s/]+/i.test(hubspot.baseUrl)) {\n    fail('crm.hubspot.baseUrl must be a valid http(s) URL');\n  }\n  if ((hubspot.phoneOnlyPolicy || 'skip') !== 'skip') {\n    fail('crm.hubspot.phoneOnlyPolicy currently supports only \"skip\"');\n  }\n  if (hubspot.searchEmailProperty !== undefined && !isText(hubspot.searchEmailProperty)) {\n    fail('crm.hubspot.searchEmailProperty must be a non-empty string');\n  }\n  const searchLimit = Number(hubspot.searchLimit || 10);\n  if (!Number.isInteger(searchLimit) || searchLimit < 1 || searchLimit > 100) {\n    fail('crm.hubspot.searchLimit must be an integer between 1 and 100');\n  }\n  if (hubspot.propertiesToReturn !== undefined) {\n    if (!Array.isArray(hubspot.propertiesToReturn) || hubspot.propertiesToReturn.some((item) => !isText(item))) {\n      fail('crm.hubspot.propertiesToReturn must be an array of non-empty strings');\n    }\n  }\n  const propertyMapping = requireObject(hubspot.propertyMapping, 'crm.hubspot.propertyMapping');\n  const entries = Object.entries(propertyMapping);\n  if (entries.length === 0) fail('crm.hubspot.propertyMapping must contain at least one property');\n  for (const [destination, sourceField] of entries) {\n    if (!isText(destination)) fail('crm.hubspot.propertyMapping contains an empty destination property');\n    if (!isText(sourceField) || !leadFields.has(sourceField)) {\n      fail(`crm.hubspot.propertyMapping.${destination} must reference a valid Lead field`);\n    }\n  }\n  if (!isText(propertyMapping.email)) {\n    fail('crm.hubspot.propertyMapping.email is required for contact deduplication');\n  }\n}\n\nif (crm.provider === 'google_sheets') {\n  const sheets = requireObject(crm.googleSheets, 'crm.googleSheets');\n  requireText(sheets, 'spreadsheetId', 'crm.googleSheets.spreadsheetId');\n  requireText(sheets, 'leadsSheetName', 'crm.googleSheets.leadsSheetName');\n  const columns = requireObject(sheets.columns, 'crm.googleSheets.columns');\n  if (!isText(columns.name)) fail('crm.googleSheets.columns.name must be a non-empty string');\n  if (!isText(columns.email) && !isText(columns.phone)) {\n    fail('crm.googleSheets.columns must include email or phone');\n  }\n}\n\nconst journal = config.journal === undefined ? { enabled: false } : requireObject(config.journal, 'journal');\njournal.enabled = Boolean(journal.enabled);\nif (journal.enabled) {\n  if (journal.provider !== 'google_sheets') fail('journal.provider must be \"google_sheets\"');\n  const journalSheets = requireSheets(journal.googleSheets, 'journal.googleSheets');\n  if (crm.provider === 'google_sheets') {\n    const crmSheets = crm.googleSheets || {};\n    if (crmSheets.spreadsheetId === journalSheets.spreadsheetId && crmSheets.leadsSheetName === journalSheets.sheetName) {\n      fail('journal must target a different sheet than crm.googleSheets when CRM is Google Sheets');\n    }\n  }\n}\n\nconst notifications = config.notifications === undefined ? { enabled: false } : requireObject(config.notifications, 'notifications');\nnotifications.enabled = Boolean(notifications.enabled);\nif (notifications.enabled) {\n  if (!Array.isArray(notifications.channels) || notifications.channels.length === 0) {\n    fail('notifications.channels must contain at least one channel when notifications are enabled');\n  }\n  for (const channel of notifications.channels || []) {\n    if (channel !== 'telegram') fail(`unsupported notification channel: ${channel}`);\n  }\n  if ((notifications.channels || []).includes('telegram')) {\n    const telegram = requireObject(notifications.telegram, 'notifications.telegram');\n    requireText(telegram, 'chatId', 'notifications.telegram.chatId');\n    if (!isText(telegram.messageTemplate)) {\n      fail('notifications.telegram.messageTemplate must be a non-empty string');\n    } else {\n      const allowed = new Set(['name', 'firstName', 'lastName', 'email', 'phone', 'source', 'message', 'externalId', 'requestId', 'crmStatus', 'crmProvider', 'crmContactId']);\n      const placeholders = [...telegram.messageTemplate.matchAll(/\\{\\{\\s*(\\w+)\\s*\\}\\}/g)].map((match) => match[1]);\n      for (const placeholder of placeholders) {\n        if (!allowed.has(placeholder)) fail(`notifications.telegram.messageTemplate contains unknown placeholder {{${placeholder}}}`);\n      }\n    }\n  }\n}\n\nconst errors = config.errors === undefined ? { enabled: false } : requireObject(config.errors, 'errors');\nerrors.enabled = Boolean(errors.enabled);\nif (errors.enabled) {\n  if (errors.provider !== 'google_sheets') fail('errors.provider must be \"google_sheets\"');\n  const errorSheets = requireObject(errors.googleSheets, 'errors.googleSheets');\n  requireText(errorSheets, 'spreadsheetId', 'errors.googleSheets.spreadsheetId');\n  requireText(errorSheets, 'sheetName', 'errors.googleSheets.sheetName');\n  const errorColumns = requireObject(errorSheets.columns, 'errors.googleSheets.columns');\n  for (const field of ['createdAt', 'requestId', 'stage', 'error']) {\n    if (!isText(errorColumns[field])) fail(`errors.googleSheets.columns.${field} must be a non-empty string`);\n  }\n}\n\nif (crm.provider === 'none' && !journal.enabled) {\n  fail('at least one persistence target is required: crm.provider or journal.enabled');\n}\n\nconfig.version = 2;\nconfig.source = source;\nconfig.source.allowedSources = Array.isArray(source.allowedSources) ? source.allowedSources : [];\nconfig.crm = crm;\nconfig.journal = journal;\nconfig.notifications = notifications;\nconfig.errors = errors;\n\nif (config.crm.provider === 'hubspot') {\n  const hubspot = config.crm.hubspot;\n  hubspot.baseUrl = hubspot.baseUrl.replace(/\\/+$/, '');\n  hubspot.phoneOnlyPolicy = 'skip';\n  hubspot.searchEmailProperty = hubspot.searchEmailProperty || 'email';\n  delete hubspot.searchPhoneProperty;\n  hubspot.searchLimit = Number(hubspot.searchLimit || 10);\n  hubspot.propertiesToReturn = Array.isArray(hubspot.propertiesToReturn)\n    ? hubspot.propertiesToReturn\n    : ['email', 'phone', 'firstname', 'lastname'];\n}\n\nif (failures.length > 0) {\n  throw new Error(`Invalid client config: ${failures.join('; ')}`);\n}\n\nreturn [{ json: { config } }];"
       },
-      "id": "28563d40-2992-422b-a3d0-2eb92d3e372b",
+      "id": "bf77f300-d780-4164-a157-88b98e5e603c",
       "name": "Validate Client Config",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        -380,
+        -1540,
         0
       ],
       "onError": "continueErrorOutput"
@@ -70,14 +70,14 @@
     {
       "parameters": {
         "mode": "runOnceForAllItems",
-        "jsCode": "// Pure input normalization: mapping and defaults only.\n// Validation and external calls are separate nodes.\nconst config = $('Validate Client Config').first().json.config;\nconst rawBody = $('Lead Webhook').first().json.body;\nconst bodyIsObject = rawBody !== null && typeof rawBody === 'object' && !Array.isArray(rawBody);\nconst payload = bodyIsObject ? rawBody : {};\n\nconst mapping = config.mapping;\nconst getByPath = (obj, path) => {\n  if (typeof path !== 'string' || path.length === 0) return undefined;\n  return path.split('.').reduce((acc, key) => (acc === null || acc === undefined ? undefined : acc[key]), obj);\n};\nconst asText = (value) => {\n  if (value === null || value === undefined) return null;\n  if (typeof value === 'string') {\n    const trimmed = value.trim();\n    return trimmed.length > 0 ? trimmed : null;\n  }\n  if (typeof value === 'number' || typeof value === 'boolean') return String(value);\n  return null;\n};\n\nconst emailRaw = asText(getByPath(payload, mapping.email));\nconst phoneRaw = asText(getByPath(payload, mapping.phone));\nconst sourceRaw = asText(getByPath(payload, mapping.source));\nconst phoneDigits = phoneRaw ? phoneRaw.replace(/\\D/g, '') : '';\nconst phone = phoneDigits.length > 0\n  ? (phoneRaw.trim().startsWith('+') ? '+' : '') + phoneDigits\n  : null;\n\nconst requestId = $execution && $execution.id ? String($execution.id) : null;\nconst receivedAt = new Date().toISOString();\n\nreturn [{\n  json: {\n    lead: {\n      name: asText(getByPath(payload, mapping.name)),\n      email: emailRaw ? emailRaw.toLowerCase() : null,\n      phone,\n      source: (sourceRaw || (config.defaults && config.defaults.source) || 'unknown').toLowerCase(),\n      message: asText(getByPath(payload, mapping.message)),\n      externalId: asText(getByPath(payload, mapping.externalId)),\n    },\n    meta: { requestId, receivedAt, bodyIsObject },\n  },\n}];"
+        "jsCode": "const config = $('Validate Client Config').first().json.config;\nconst rawBody = $('Lead Webhook').first().json.body;\nconst bodyIsObject = rawBody !== null && typeof rawBody === 'object' && !Array.isArray(rawBody);\nconst payload = bodyIsObject ? rawBody : {};\n\nconst mapping = config.mapping;\nconst getByPath = (obj, path) => {\n  if (typeof path !== 'string' || path.length === 0) return undefined;\n  return path.split('.').reduce((acc, key) => (acc === null || acc === undefined ? undefined : acc[key]), obj);\n};\nconst asText = (value) => {\n  if (value === null || value === undefined) return null;\n  if (typeof value === 'string') {\n    const trimmed = value.trim();\n    return trimmed.length > 0 ? trimmed : null;\n  }\n  if (typeof value === 'number' || typeof value === 'boolean') return String(value);\n  return null;\n};\n\nconst name = asText(getByPath(payload, mapping.name));\nconst emailRaw = asText(getByPath(payload, mapping.email));\nconst phoneRaw = asText(getByPath(payload, mapping.phone));\nconst sourceRaw = asText(getByPath(payload, mapping.source));\nconst phoneDigits = phoneRaw ? phoneRaw.replace(/\\D/g, '') : '';\nconst phone = phoneDigits.length > 0\n  ? (phoneRaw.trim().startsWith('+') ? '+' : '') + phoneDigits\n  : null;\nconst nameParts = name ? name.split(/\\s+/) : [];\nconst firstName = nameParts.length > 0 ? nameParts[0] : null;\nconst lastName = nameParts.length > 1 ? nameParts.slice(1).join(' ') : null;\n\nconst allowedSources = Array.isArray(config.source.allowedSources)\n  ? config.source.allowedSources.map((item) => item.toLowerCase())\n  : [];\nconst sourceValue = sourceRaw ? sourceRaw.toLowerCase() : null;\nconst source = sourceValue && (allowedSources.length === 0 || allowedSources.includes(sourceValue))\n  ? sourceValue\n  : (config.source.defaultSource || 'unknown').toLowerCase();\nconst sourceAdjusted = Boolean(sourceRaw && sourceValue !== source);\nconst requestId = $execution && $execution.id ? String($execution.id) : null;\nconst receivedAt = new Date().toISOString();\n\nreturn [{\n  json: {\n    lead: {\n      name,\n      firstName,\n      lastName,\n      email: emailRaw ? emailRaw.toLowerCase() : null,\n      phone,\n      source,\n      message: asText(getByPath(payload, mapping.message)),\n      externalId: asText(getByPath(payload, mapping.externalId)),\n    },\n    meta: { requestId, receivedAt, bodyIsObject, sourceAdjusted },\n    config,\n  },\n}];"
       },
-      "id": "db72f55a-cf00-4002-ba05-3a6f53068e13",
+      "id": "baabf730-ab21-4365-8d2a-de3b09cb8cb9",
       "name": "Normalize Lead",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        -160,
+        -1320,
         0
       ],
       "onError": "continueErrorOutput"
@@ -85,14 +85,14 @@
     {
       "parameters": {
         "mode": "runOnceForAllItems",
-        "jsCode": "// Business validation over the normalized Lead.\nconst { lead, meta } = $input.first().json;\nconst errors = [];\n\nif (!meta.bodyIsObject) {\n  errors.push('Request body must be a JSON object.');\n}\nif (!lead.name) {\n  errors.push('name is required.');\n}\nif (!lead.email && !lead.phone) {\n  errors.push('At least one of email or phone is required.');\n}\n\nreturn [{\n  json: {\n    lead,\n    meta,\n    validation: {\n      valid: errors.length === 0,\n      errors,\n    },\n  },\n}];"
+        "jsCode": "const { lead, meta, config } = $input.first().json;\nconst errors = [];\n\nif (!meta.bodyIsObject) errors.push('Request body must be a JSON object.');\nif (!lead.name) errors.push('name is required.');\nif (!lead.email && !lead.phone) errors.push('At least one of email or phone is required.');\n\nreturn [{\n  json: {\n    lead,\n    meta,\n    config,\n    validation: { valid: errors.length === 0, errors },\n  },\n}];"
       },
-      "id": "532a48c0-f75f-468c-b769-c1d8b1a96e51",
+      "id": "8f39f503-9c82-4960-be4a-905591e6ba0a",
       "name": "Validate Lead",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        60,
+        -1100,
         0
       ]
     },
@@ -107,7 +107,7 @@
           },
           "conditions": [
             {
-              "id": "1103b201-2bad-4c0d-97d1-758a4d147d97",
+              "id": "465bf70c-ec2c-4f15-9d9f-5bfe7e91090f",
               "leftValue": "={{ $json.validation.valid }}",
               "rightValue": "",
               "operator": {
@@ -121,153 +121,26 @@
         },
         "options": {}
       },
-      "id": "dbb99a94-0aa3-4a3e-9e4e-b2c7afe00a94",
+      "id": "27aa457b-7509-45dc-93ba-622f5e686e09",
       "name": "Lead Is Valid?",
       "type": "n8n-nodes-base.if",
       "typeVersion": 2.2,
       "position": [
-        280,
+        -880,
         0
       ]
     },
     {
       "parameters": {
         "mode": "runOnceForAllItems",
-        "jsCode": "const validated = $('Validate Lead').first().json;\nconst config = $('Validate Client Config').first().json.config;\nconst columns = config.googleSheets.columns;\nconst values = {\n  createdAt: validated.meta.receivedAt,\n  externalId: validated.lead.externalId,\n  name: validated.lead.name,\n  email: validated.lead.email,\n  phone: validated.lead.phone,\n  source: validated.lead.source,\n  message: validated.lead.message,\n  requestId: validated.meta.requestId,\n};\nconst row = {};\nfor (const [key, header] of Object.entries(columns)) {\n  if (typeof header !== 'string' || header.length === 0) continue;\n  row[header] = values[key] === null || values[key] === undefined ? '' : values[key];\n}\nif (Object.keys(row).length === 0) {\n  throw new Error('No Google Sheets lead columns are configured');\n}\nreturn [{ json: row }];"
+        "jsCode": "const validated = $('Validate Lead').first().json;\nreturn [{ json: { response: { ok: false, error: 'validation_error', message: 'Lead validation failed.', details: validated.validation.errors, requestId: validated.meta.requestId } } }];"
       },
-      "id": "3e131b69-7738-4322-802f-8a7a2cba11b8",
-      "name": "Map Lead To CRM Payload",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [
-        500,
-        -80
-      ],
-      "onError": "continueErrorOutput"
-    },
-    {
-      "parameters": {
-        "authentication": "oAuth2",
-        "resource": "sheet",
-        "operation": "append",
-        "documentId": {
-          "__rl": true,
-          "mode": "id",
-          "value": "={{ $('Validate Client Config').first().json.config.googleSheets.spreadsheetId }}"
-        },
-        "sheetName": {
-          "__rl": true,
-          "mode": "name",
-          "value": "={{ $('Validate Client Config').first().json.config.googleSheets.leadsSheetName }}"
-        },
-        "columns": {
-          "mappingMode": "autoMapInputData",
-          "value": {},
-          "matchingColumns": [],
-          "schema": [],
-          "attemptToConvertTypes": false,
-          "convertFieldsToString": false
-        },
-        "options": {
-          "cellFormat": "RAW"
-        }
-      },
-      "id": "9f35406b-d4b0-441b-bd9d-362a34f5a47b",
-      "name": "CRM Adapter - Google Sheets",
-      "type": "n8n-nodes-base.googleSheets",
-      "typeVersion": 4.7,
-      "position": [
-        720,
-        -80
-      ],
-      "onError": "continueErrorOutput"
-    },
-    {
-      "parameters": {
-        "mode": "runOnceForAllItems",
-        "jsCode": "const validated = $('Validate Lead').first().json;\nconst config = $('Validate Client Config').first().json.config;\nconst escapeHtml = (value) => String(value)\n  .replace(/&/g, '&amp;')\n  .replace(/</g, '&lt;')\n  .replace(/>/g, '&gt;')\n  .replace(/\"/g, '&quot;');\nconst values = {\n  name: escapeHtml(validated.lead.name || '-'),\n  email: escapeHtml(validated.lead.email || '-'),\n  phone: escapeHtml(validated.lead.phone || '-'),\n  source: escapeHtml(validated.lead.source || '-'),\n  message: escapeHtml(validated.lead.message || '-'),\n  externalId: escapeHtml(validated.lead.externalId || '-'),\n  requestId: escapeHtml(validated.meta.requestId || '-'),\n};\nlet text = String(config.telegram.messageTemplate);\nfor (const [key, value] of Object.entries(values)) {\n  const pattern = new RegExp(`\\\\{\\\\{\\\\s*${key}\\\\s*\\\\}\\\\}`, 'g');\n  text = text.replace(pattern, () => value);\n}\nif (text.length > 4000) {\n  text = `${text.slice(0, 3980).replace(/&[a-zA-Z#0-9]*$/, '')}\\n[truncated]`;\n}\nreturn [{ json: { text } }];"
-      },
-      "id": "16090fa9-7148-48c1-80f5-ab2e8c25adba",
-      "name": "Build Notification Message",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [
-        940,
-        -80
-      ],
-      "onError": "continueErrorOutput"
-    },
-    {
-      "parameters": {
-        "resource": "message",
-        "operation": "sendMessage",
-        "chatId": "={{ $('Validate Client Config').first().json.config.telegram.chatId }}",
-        "text": "={{ $json.text }}",
-        "additionalFields": {
-          "parse_mode": "HTML",
-          "appendAttribution": false
-        }
-      },
-      "id": "d2142f1a-d206-49f5-aeea-d076ca1bed0d",
-      "name": "Notification Adapter - Telegram",
-      "type": "n8n-nodes-base.telegram",
-      "typeVersion": 1.2,
-      "position": [
-        1160,
-        -80
-      ],
-      "onError": "continueErrorOutput"
-    },
-    {
-      "parameters": {
-        "mode": "runOnceForAllItems",
-        "jsCode": "const validated = $('Validate Lead').first().json;\nreturn [{\n  json: {\n    response: {\n      ok: true,\n      status: 'created',\n      saved: true,\n      notified: true,\n      requestId: validated.meta.requestId,\n      externalId: validated.lead.externalId,\n    },\n  },\n}];"
-      },
-      "id": "7c84b6f3-51b1-4f16-b685-84ca50ead5f8",
-      "name": "Build Success Response",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [
-        1380,
-        -80
-      ]
-    },
-    {
-      "parameters": {
-        "respondWith": "json",
-        "responseBody": "={{ $json.response }}",
-        "options": {
-          "responseCode": 201,
-          "responseHeaders": {
-            "entries": [
-              {
-                "name": "Content-Type",
-                "value": "application/json"
-              }
-            ]
-          }
-        }
-      },
-      "id": "44874eb0-1e15-44fd-85a0-23d5b38e59a7",
-      "name": "Respond 201 Created",
-      "type": "n8n-nodes-base.respondToWebhook",
-      "typeVersion": 1.5,
-      "position": [
-        1600,
-        -80
-      ]
-    },
-    {
-      "parameters": {
-        "mode": "runOnceForAllItems",
-        "jsCode": "const validated = $('Validate Lead').first().json;\nreturn [{\n  json: {\n    response: {\n      ok: false,\n      error: 'validation_error',\n      message: 'Lead validation failed.',\n      details: validated.validation.errors,\n      requestId: validated.meta.requestId,\n    },\n  },\n}];"
-      },
-      "id": "ababe543-de84-4e8c-a26a-73737e44bebf",
+      "id": "b8d3f125-759b-41af-be00-24e84f041232",
       "name": "Build Validation Response",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        500,
+        -660,
         180
       ]
     },
@@ -287,106 +160,111 @@
           }
         }
       },
-      "id": "06869019-668d-42d0-9eda-ddb432fef257",
+      "id": "582cf2d8-2946-49c7-9915-bb6936caafaf",
       "name": "Respond 400 Validation Error",
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1.5,
       "position": [
-        720,
+        -440,
+        180
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "cdc011c9-2062-4ebe-a842-a496924c04ae",
+              "leftValue": "={{ $json.config.crm.provider === 'hubspot' }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "9847a14b-9119-4566-9ebc-1869d876853c",
+      "name": "CRM Provider Is HubSpot?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -660,
+        -40
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "df456cff-07d4-44b7-8074-a8bb2c68cd53",
+              "leftValue": "={{ $json.config.crm.provider === 'google_sheets' }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "a105fc36-f83f-4149-a9fd-e5094f2ac284",
+      "name": "CRM Provider Is Google Sheets?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -440,
+        80
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const validated = $('Validate Lead').first().json;\nconst config = $('Validate Client Config').first().json.config;\nconst crm = {\n  provider: 'none',\n  status: 'skipped',\n  contactId: null,\n  matchedBy: null,\n  matchCount: 0,\n  reason: 'crm_disabled',\n  httpStatus: 202,\n};\nreturn [{\n  json: {\n    lead: validated.lead,\n    meta: validated.meta,\n    config,\n    crm,\n    journal: null,\n    notifications: null,\n    warnings: [],\n    hasWarning: false,\n  },\n}];"
+      },
+      "id": "15416a43-47e5-47b4-b576-cd8256efd57a",
+      "name": "Build No CRM Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -220,
         180
       ]
     },
     {
       "parameters": {
         "mode": "runOnceForAllItems",
-        "jsCode": "const input = $input.first().json;\nconst rawError = input.error;\nconst detail = typeof rawError === 'string'\n  ? rawError\n  : (rawError && (rawError.message || rawError.description)) || input.message || 'Google Sheets append failed';\nconst validated = $('Validate Lead').first().json;\nconst meta = validated.meta;\nconst executionId = $execution && $execution.id ? String($execution.id) : null;\n\nreturn [{\n  json: {\n    response: {\n      ok: false,\n      error: 'crm_write_failed',\n      message: 'Lead was not saved to the CRM.',\n      saved: false,\n      notified: false,\n      requestId: meta.requestId,\n    },\n    log: {\n      createdAt: new Date().toISOString(),\n      requestId: meta.requestId,\n      stage: 'google_sheets_append',\n      error: String(detail).slice(0, 2000),\n      leadJson: JSON.stringify(validated.lead).slice(0, 4000),\n      executionId,\n    },\n  },\n}];"
+        "jsCode": "const validated = $('Validate Lead').first().json;\nconst config = $('Validate Client Config').first().json.config;\nconst columns = config.crm.googleSheets.columns;\nconst values = {\n  createdAt: validated.meta.receivedAt,\n  externalId: validated.lead.externalId,\n  name: validated.lead.name,\n  firstName: validated.lead.firstName,\n  lastName: validated.lead.lastName,\n  email: validated.lead.email,\n  phone: validated.lead.phone,\n  source: validated.lead.source,\n  message: validated.lead.message,\n  requestId: validated.meta.requestId,\n};\nconst row = {};\nfor (const [key, header] of Object.entries(columns)) {\n  if (typeof header !== 'string' || header.length === 0) continue;\n  row[header] = values[key] === null || values[key] === undefined ? '' : values[key];\n}\nif (Object.keys(row).length === 0) throw new Error('No Google Sheets CRM columns are configured');\nreturn [{ json: row }];"
       },
-      "id": "517c1c68-ffdd-494d-9e62-f0d0d9af8ede",
-      "name": "Build CRM Failure Response",
+      "id": "308aa469-e9f3-4bb5-867a-f393638b9c42",
+      "name": "Map CRM Sheet Row",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        940,
-        200
-      ]
-    },
-    {
-      "parameters": {
-        "respondWith": "json",
-        "responseBody": "={{ $json.response }}",
-        "options": {
-          "responseCode": 502,
-          "responseHeaders": {
-            "entries": [
-              {
-                "name": "Content-Type",
-                "value": "application/json"
-              }
-            ]
-          }
-        }
-      },
-      "id": "6135674c-d54d-426d-b092-9407fbd53374",
-      "name": "Respond 502 CRM Failure",
-      "type": "n8n-nodes-base.respondToWebhook",
-      "typeVersion": 1.5,
-      "position": [
-        1160,
-        200
-      ]
-    },
-    {
-      "parameters": {
-        "mode": "runOnceForAllItems",
-        "jsCode": "const input = $input.first().json;\nconst rawError = input.error;\nconst detail = typeof rawError === 'string'\n  ? rawError\n  : (rawError && (rawError.message || rawError.description)) || input.message || 'Telegram send failed';\nconst validated = $('Validate Lead').first().json;\nconst meta = validated.meta;\nconst executionId = $execution && $execution.id ? String($execution.id) : null;\n\nreturn [{\n  json: {\n    response: {\n      ok: true,\n      status: 'saved_with_notification_error',\n      saved: true,\n      notified: false,\n      message: 'Lead saved, but the Telegram notification failed.',\n      requestId: meta.requestId,\n    },\n    log: {\n      createdAt: new Date().toISOString(),\n      requestId: meta.requestId,\n      stage: 'telegram_send',\n      error: String(detail).slice(0, 2000),\n      leadJson: JSON.stringify(validated.lead).slice(0, 4000),\n      executionId,\n    },\n  },\n}];"
-      },
-      "id": "42de5e85-6db3-435f-801f-d53c2983f801",
-      "name": "Build Notification Warning",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [
-        1380,
-        200
-      ]
-    },
-    {
-      "parameters": {
-        "respondWith": "json",
-        "responseBody": "={{ $json.response }}",
-        "options": {
-          "responseCode": 201,
-          "responseHeaders": {
-            "entries": [
-              {
-                "name": "Content-Type",
-                "value": "application/json"
-              }
-            ]
-          }
-        }
-      },
-      "id": "9f7ec0a2-feb3-4493-812e-6f57cafbc204",
-      "name": "Respond 201 Notification Warning",
-      "type": "n8n-nodes-base.respondToWebhook",
-      "typeVersion": 1.5,
-      "position": [
-        1600,
-        200
-      ]
-    },
-    {
-      "parameters": {
-        "mode": "runOnceForAllItems",
-        "jsCode": "const payload = $input.first().json;\nconst log = payload.log;\nconst config = $('Validate Client Config').first().json.config;\nconst columns = config.googleSheets.errorColumns;\nconst row = {};\nfor (const [key, header] of Object.entries(columns)) {\n  if (typeof header !== 'string' || header.length === 0) continue;\n  if (log[key] !== undefined && log[key] !== null) row[header] = log[key];\n}\nif (Object.keys(row).length === 0) {\n  throw new Error('No Google Sheets error columns are configured');\n}\nreturn [{ json: row }];"
-      },
-      "id": "21cae127-a202-4724-bf15-77f5480f3319",
-      "name": "Prepare Error Log Row",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [
-        1380,
-        420
-      ]
+        -220,
+        -80
+      ],
+      "onError": "continueErrorOutput"
     },
     {
       "parameters": {
@@ -396,12 +274,12 @@
         "documentId": {
           "__rl": true,
           "mode": "id",
-          "value": "={{ $('Validate Client Config').first().json.config.googleSheets.spreadsheetId }}"
+          "value": "={{ $('Validate Client Config').first().json.config.crm.googleSheets.spreadsheetId }}"
         },
         "sheetName": {
           "__rl": true,
           "mode": "name",
-          "value": "={{ $('Validate Client Config').first().json.config.googleSheets.errorsSheetName }}"
+          "value": "={{ $('Validate Client Config').first().json.config.crm.googleSheets.leadsSheetName }}"
         },
         "columns": {
           "mappingMode": "autoMapInputData",
@@ -415,42 +293,776 @@
           "cellFormat": "RAW"
         }
       },
-      "id": "9b8aef01-ff10-42be-949b-09ae22d93f7d",
-      "name": "Error Log Adapter - Google Sheets",
+      "id": "c9f22198-fec9-4882-a5fe-b0706ae54b0a",
+      "name": "CRM Adapter - Google Sheets",
       "type": "n8n-nodes-base.googleSheets",
       "typeVersion": 4.7,
       "position": [
-        1600,
-        420
+        0,
+        -80
       ],
-      "onError": "continueRegularOutput"
+      "onError": "continueErrorOutput",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000
     },
     {
       "parameters": {
-        "errorType": "errorMessage",
-        "errorMessage": "={{ 'Lead intake integration failure. See execution ' + $execution.id + ' and the Errors sheet.' }}"
+        "mode": "runOnceForAllItems",
+        "jsCode": "const validated = $('Validate Lead').first().json;\nconst config = $('Validate Client Config').first().json.config;\nconst crm = {\n  provider: 'google_sheets',\n  status: 'created',\n  contactId: null,\n  matchedBy: null,\n  matchCount: 0,\n  reason: null,\n  httpStatus: 201,\n};\nreturn [{\n  json: {\n    lead: validated.lead,\n    meta: validated.meta,\n    config,\n    crm,\n    journal: null,\n    notifications: null,\n    warnings: [],\n    hasWarning: false,\n  },\n}];"
       },
-      "id": "9e2720da-4fc9-47b2-ba2a-51b9727d1217",
-      "name": "Stop With Integration Error",
-      "type": "n8n-nodes-base.stopAndError",
-      "typeVersion": 1,
+      "id": "6be838ff-9edb-4172-b4b5-740750bec435",
+      "name": "Normalize Google Sheets CRM Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
       "position": [
-        1820,
-        420
+        220,
+        -80
       ]
     },
     {
       "parameters": {
         "mode": "runOnceForAllItems",
-        "jsCode": "const input = $input.first().json;\nconst rawError = input.error;\nconst detail = typeof rawError === 'string'\n  ? rawError\n  : (rawError && (rawError.message || rawError.description)) || input.message || 'Configuration error';\nconst requestId = $execution && $execution.id ? String($execution.id) : null;\n\nreturn [{\n  json: {\n    response: {\n      ok: false,\n      error: 'configuration_error',\n      message: 'Lead intake is not configured correctly or the request could not be normalized.',\n      detail: String(detail).slice(0, 500),\n      requestId,\n    },\n  },\n}];"
+        "jsCode": "const validated = $('Validate Lead').first().json;\nconst config = $('Validate Client Config').first().json.config;\nconst hubspot = config.crm.hubspot;\nconst lead = validated.lead;\n\nconst contactProperties = {};\nfor (const [destination, sourceField] of Object.entries(hubspot.propertyMapping)) {\n  const value = lead[sourceField];\n  if (value !== null && value !== undefined && String(value).trim() !== '') {\n    contactProperties[destination] = String(value);\n  }\n}\n\nlet action = 'search';\nlet reason = null;\nlet matchedBy = 'email';\nlet searchProperty = hubspot.searchEmailProperty;\nlet searchValue = lead.email;\n\nif (!lead.email) {\n  action = 'skip';\n  reason = 'phone_only';\n  matchedBy = null;\n  searchValue = null;\n}\n\nconst requestBody = action === 'search'\n  ? {\n      filterGroups: [{ filters: [{ propertyName: searchProperty, operator: 'EQ', value: searchValue }] }],\n      properties: hubspot.propertiesToReturn,\n      limit: hubspot.searchLimit,\n    }\n  : null;\n\nreturn [{\n  json: {\n    lead,\n    meta: validated.meta,\n    config,\n    action,\n    reason,\n    matchedBy,\n    searchProperty,\n    searchValue,\n    contactProperties,\n    requestBody,\n  },\n}];"
       },
-      "id": "fbd61289-5141-49f2-87b4-3e463c74ec59",
+      "id": "43a28c3c-31e4-4733-b1a3-df4ab96fae27",
+      "name": "Prepare HubSpot Contact",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -440,
+        -200
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "0493d7c6-5ec8-4543-9efa-788268f81868",
+              "leftValue": "={{ $json.action === 'search' }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "b2ae90a4-6a7b-4bf0-993d-0c3d96e06d16",
+      "name": "HubSpot Search Needed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -220,
+        -200
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Validate Client Config').first().json.config.crm.hubspot.baseUrl + '/crm/v3/objects/contacts/search' }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "hubspotAppToken",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json.requestBody }}",
+        "options": {}
+      },
+      "id": "3901a7e8-8843-467b-830f-6f2a67666893",
+      "name": "HubSpot Search Contact",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        0,
+        -240
+      ],
+      "onError": "continueErrorOutput",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const response = $input.first().json;\nconst prepared = $('Prepare HubSpot Contact').first().json;\nconst results = Array.isArray(response)\n  ? response\n  : (Array.isArray(response.results) ? response.results : []);\nconst matchCount = results.length;\n\nlet action = 'create';\nlet reason = null;\nlet contactId = null;\n\nif (matchCount === 1) {\n  action = 'update';\n  contactId = String(results[0].id ?? results[0].vid ?? '');\n} else if (matchCount > 1) {\n  action = 'skip';\n  reason = 'ambiguous_match';\n}\n\nreturn [{\n  json: {\n    ...prepared,\n    action,\n    reason,\n    contactId,\n    matchCount,\n    requestBody: { properties: prepared.contactProperties },\n    searchResult: results[0] || null,\n  },\n}];"
+      },
+      "id": "6499d886-357f-40ad-ba26-758e9fb088c0",
+      "name": "Resolve HubSpot Match",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        -240
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "a1f8587a-0f88-46e7-9017-ecd2b026fef6",
+              "leftValue": "={{ $json.action === 'create' || $json.action === 'update' }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "3c39c595-ca22-4d34-b014-19a3ea2180f0",
+      "name": "HubSpot Can Upsert?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        440,
+        -240
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "a3809c28-d8ec-4d58-b66e-8d634464eeca",
+              "leftValue": "={{ $json.action === 'update' }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "0d565554-fe56-4980-bad1-c024a69bb9f4",
+      "name": "HubSpot Action Is Update?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        660,
+        -300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Validate Client Config').first().json.config.crm.hubspot.baseUrl + '/crm/v3/objects/contacts' }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "hubspotAppToken",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json.requestBody }}",
+        "options": {}
+      },
+      "id": "292d7f02-7814-486c-98ec-f05e8769081c",
+      "name": "HubSpot Create Contact",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        880,
+        -180
+      ],
+      "onError": "continueErrorOutput",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "method": "PATCH",
+        "url": "={{ $('Validate Client Config').first().json.config.crm.hubspot.baseUrl + '/crm/v3/objects/contacts/' + $json.contactId }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "hubspotAppToken",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json.requestBody }}",
+        "options": {}
+      },
+      "id": "497b03c4-8421-4485-a8a1-aa2c5cfbc137",
+      "name": "HubSpot Update Contact",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        880,
+        -380
+      ],
+      "onError": "continueErrorOutput",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const response = $input.first().json;\nconst prepared = $('Resolve HubSpot Match').first().json;\nconst status = prepared.action === 'update' ? 'updated' : 'created';\nconst contactId = String(response.id ?? response.vid ?? prepared.contactId ?? '');\nconst crm = {\n  provider: 'hubspot',\n  status,\n  contactId,\n  matchedBy: prepared.matchedBy,\n  matchCount: prepared.matchCount,\n  reason: null,\n  httpStatus: status === 'created' ? 201 : 200,\n};\nreturn [{\n  json: {\n    lead: prepared.lead,\n    meta: prepared.meta,\n    config: prepared.config,\n    crm,\n    journal: null,\n    notifications: null,\n    warnings: [],\n    hasWarning: false,\n  },\n}];"
+      },
+      "id": "7536cdcf-f166-4d5e-b6e3-0ce5840aa848",
+      "name": "Normalize HubSpot Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1100,
+        -260
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const data = $input.first().json;\nconst reason = data.reason || (data.matchCount > 1 ? 'ambiguous_match' : 'skipped');\nconst crm = {\n  provider: 'hubspot',\n  status: 'skipped',\n  contactId: data.contactId || null,\n  matchedBy: data.matchedBy || null,\n  matchCount: data.matchCount || 0,\n  reason,\n  httpStatus: 202,\n};\nreturn [{\n  json: {\n    lead: data.lead,\n    meta: data.meta,\n    config: data.config,\n    crm,\n    journal: null,\n    notifications: null,\n    warnings: [],\n    hasWarning: false,\n  },\n}];"
+      },
+      "id": "bdb5d442-65be-494c-9e5d-1e542019ba16",
+      "name": "Build HubSpot Skipped Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        440,
+        -80
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const input = $input.first().json;\nconst config = $('Validate Client Config').first().json.config;\nconst validated = $('Validate Lead').first().json;\nconst rawError = input.error;\nconst detail = typeof rawError === 'string'\n  ? rawError\n  : (rawError && (rawError.message || rawError.description)) || input.message || 'CRM request failed';\nconst rateLimited = /(^|\\D)429(\\D|$)|rate limit|too many requests|spacing your requests|batching settings/i.test(String(detail));\nconst provider = config.crm.provider;\nconst crm = {\n  provider,\n  status: 'failed',\n  contactId: null,\n  matchedBy: null,\n  matchCount: 0,\n  reason: rateLimited ? 'rate_limited' : 'api_error',\n  httpStatus: rateLimited ? 429 : 502,\n  error: String(detail).slice(0, 2000),\n};\nconst response = {\n  ok: false,\n  error: rateLimited ? 'crm_rate_limited' : 'crm_write_failed',\n  message: rateLimited ? 'CRM rate limit reached. Retry later.' : 'Lead was not saved to the CRM.',\n  saved: false,\n  notified: false,\n  requestId: validated.meta.requestId,\n  externalId: validated.lead.externalId,\n  crm: { provider, status: 'failed', reason: crm.reason },\n};\nreturn [{\n  json: {\n    lead: validated.lead,\n    meta: validated.meta,\n    config,\n    crm,\n    response,\n    httpStatus: crm.httpStatus,\n    hasWarning: false,\n  },\n}];"
+      },
+      "id": "bd7021cf-1c11-49ca-865f-d303aea1dd0a",
+      "name": "Build CRM Failure",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        -500
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "79de9f7e-5271-4986-aa7e-094fe655bf19",
+              "leftValue": "={{ $json.config.errors.enabled }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "b3006d69-2ae3-4856-a231-7d1056623bbb",
+      "name": "Errors Enabled?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        440,
+        -500
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const context = $('Build CRM Failure').first().json;\nconst config = context.config;\nconst columns = config.errors.googleSheets.columns;\nconst values = {\n  createdAt: new Date().toISOString(),\n  requestId: context.meta.requestId,\n  stage: `crm_${context.crm.provider}`,\n  error: context.crm.error || 'CRM request failed',\n  leadJson: JSON.stringify(context.lead).slice(0, 4000),\n  executionId: $execution && $execution.id ? String($execution.id) : '',\n};\nconst row = {};\nfor (const [key, header] of Object.entries(columns)) {\n  if (typeof header !== 'string' || header.length === 0) continue;\n  if (values[key] !== undefined && values[key] !== null) row[header] = values[key];\n}\nif (Object.keys(row).length === 0) throw new Error('No Google Sheets error columns are configured');\nreturn [{ json: row }];"
+      },
+      "id": "d7f2e9aa-9581-4f4e-8362-99a8bbef2eee",
+      "name": "Map Error Log Row",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        660,
+        -440
+      ]
+    },
+    {
+      "parameters": {
+        "authentication": "oAuth2",
+        "resource": "sheet",
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "={{ $('Validate Client Config').first().json.config.errors.googleSheets.spreadsheetId }}"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "={{ $('Validate Client Config').first().json.config.errors.googleSheets.sheetName }}"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {
+          "cellFormat": "RAW"
+        }
+      },
+      "id": "29f9aaa2-b5ee-4388-be99-747539eaf820",
+      "name": "Error Log Adapter - Google Sheets",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        880,
+        -440
+      ],
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $('Build CRM Failure').first().json.response }}",
+        "options": {
+          "responseCode": "={{ $('Build CRM Failure').first().json.httpStatus }}",
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Content-Type",
+                "value": "application/json"
+              }
+            ]
+          }
+        }
+      },
+      "id": "4530ceb8-eb6f-457c-8db3-7d40dbfeeb40",
+      "name": "Respond CRM Failure",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        1100,
+        -440
+      ]
+    },
+    {
+      "parameters": {
+        "errorType": "errorMessage",
+        "errorMessage": "={{ 'Lead intake integration failure. See execution ' + $execution.id + '.' }}"
+      },
+      "id": "0ea0c4b1-0a30-47bd-91bd-a318f1c8abd7",
+      "name": "Stop With Integration Error",
+      "type": "n8n-nodes-base.stopAndError",
+      "typeVersion": 1,
+      "position": [
+        1320,
+        -440
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "return [{ json: $input.first().json }];"
+      },
+      "id": "02736ee4-e5a5-4235-83d0-ad699c3334f6",
+      "name": "Build Journal Context",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1320,
+        -80
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "eae506a5-af9d-40ce-98cc-6f87a3f5ce49",
+              "leftValue": "={{ $json.config.journal.enabled }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "7e6bf760-5207-4933-8ecc-26f644b5a6a5",
+      "name": "Journal Enabled?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1540,
+        -80
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const context = $input.first().json;\nconst config = context.config;\nconst columns = config.journal.googleSheets.columns;\nconst values = {\n  createdAt: context.meta.receivedAt,\n  externalId: context.lead.externalId,\n  name: context.lead.name,\n  firstName: context.lead.firstName,\n  lastName: context.lead.lastName,\n  email: context.lead.email,\n  phone: context.lead.phone,\n  source: context.lead.source,\n  message: context.lead.message,\n  requestId: context.meta.requestId,\n  crmProvider: context.crm.provider,\n  crmStatus: context.crm.status,\n  crmContactId: context.crm.contactId,\n};\nconst row = {};\nfor (const [key, header] of Object.entries(columns)) {\n  if (typeof header !== 'string' || header.length === 0) continue;\n  row[header] = values[key] === null || values[key] === undefined ? '' : values[key];\n}\nif (Object.keys(row).length === 0) throw new Error('No Google Sheets journal columns are configured');\nreturn [{ json: row }];"
+      },
+      "id": "34f33569-0330-4dd1-82d0-870271c86387",
+      "name": "Map Journal Row",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1760,
+        -180
+      ]
+    },
+    {
+      "parameters": {
+        "authentication": "oAuth2",
+        "resource": "sheet",
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "={{ $('Validate Client Config').first().json.config.journal.googleSheets.spreadsheetId }}"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "={{ $('Validate Client Config').first().json.config.journal.googleSheets.sheetName }}"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {
+          "cellFormat": "RAW"
+        }
+      },
+      "id": "6bd4a90f-f4fd-482d-8804-f829b4445c0f",
+      "name": "Journal Adapter - Google Sheets",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        1980,
+        -180
+      ],
+      "onError": "continueErrorOutput",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const context = $('Build Journal Context').first().json;\nreturn [{\n  json: {\n    ...context,\n    journal: { enabled: true, status: 'saved' },\n    hasWarning: Boolean(context.hasWarning),\n  },\n}];"
+      },
+      "id": "a2d4dd8c-c1ae-4e41-9e6e-4230fce80e97",
+      "name": "Build Journal Saved",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2200,
+        -180
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const context = $('Build Journal Context').first().json;\nconst input = $input.first().json;\nconst rawError = input.error;\nconst detail = typeof rawError === 'string'\n  ? rawError\n  : (rawError && (rawError.message || rawError.description)) || input.message || 'Google Sheets journal write failed';\nreturn [{\n  json: {\n    ...context,\n    journal: { enabled: true, status: 'failed', error: String(detail).slice(0, 1000) },\n    warnings: [...(context.warnings || []), 'journal_write_failed'],\n    hasWarning: true,\n  },\n}];"
+      },
+      "id": "384ec85e-c71f-43e6-b8e0-31c2b12d8106",
+      "name": "Build Journal Warning",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2200,
+        -340
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const context = $input.first().json;\nreturn [{\n  json: {\n    ...context,\n    journal: { enabled: false, status: 'disabled' },\n    hasWarning: Boolean(context.hasWarning),\n  },\n}];"
+      },
+      "id": "03a2fc24-6520-4b56-84d8-69ac192c3ed8",
+      "name": "Build Journal Disabled",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1760,
+        20
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "e8080d7f-2d47-4072-9522-b2064f364ae1",
+              "leftValue": "={{ $json.config.notifications.enabled }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "917c9c5e-b923-4de7-9b80-d2c55c6d7d42",
+      "name": "Notifications Enabled?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2420,
+        -80
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const context = $input.first().json;\nconst config = context.config;\nconst telegram = config.notifications.telegram;\nconst escapeHtml = (value) => String(value)\n  .replace(/&/g, '&amp;')\n  .replace(/</g, '&lt;')\n  .replace(/>/g, '&gt;')\n  .replace(/\"/g, '&quot;');\nconst values = {\n  name: escapeHtml(context.lead.name || '-'),\n  firstName: escapeHtml(context.lead.firstName || '-'),\n  lastName: escapeHtml(context.lead.lastName || '-'),\n  email: escapeHtml(context.lead.email || '-'),\n  phone: escapeHtml(context.lead.phone || '-'),\n  source: escapeHtml(context.lead.source || '-'),\n  message: escapeHtml(context.lead.message || '-'),\n  externalId: escapeHtml(context.lead.externalId || '-'),\n  requestId: escapeHtml(context.meta.requestId || '-'),\n  crmStatus: escapeHtml(context.crm.status || '-'),\n  crmProvider: escapeHtml(context.crm.provider || '-'),\n  crmContactId: escapeHtml(context.crm.contactId || '-'),\n};\nlet text = String(telegram.messageTemplate);\nfor (const [key, value] of Object.entries(values)) {\n  const pattern = new RegExp(`\\\\{\\\\{\\\\s*${key}\\\\s*\\\\}\\\\}`, 'g');\n  text = text.replace(pattern, () => value);\n}\nif (text.length > 4000) {\n  text = `${text.slice(0, 3980).replace(/&[a-zA-Z#0-9]*$/, '')}\\n[truncated]`;\n}\nreturn [{ json: { ...context, text } }];"
+      },
+      "id": "25583a08-6416-42a3-8bf3-c9639f4f21e2",
+      "name": "Build Notification Message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2640,
+        -160
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const context = $('Build Journal Context').first().json;\nconst input = $input.first().json;\nconst rawError = input.error;\nconst detail = typeof rawError === 'string'\n  ? rawError\n  : (rawError && (rawError.message || rawError.description)) || input.message || 'Notification message build failed';\nreturn [{\n  json: {\n    ...context,\n    notifications: {\n      enabled: true,\n      status: 'failed',\n      channels: context.config.notifications.channels,\n      error: String(detail).slice(0, 1000),\n    },\n    warnings: [...(context.warnings || []), 'notification_send_failed'],\n    hasWarning: true,\n  },\n}];"
+      },
+      "id": "da9a94cc-7b30-40c4-80de-bc8fc578be4c",
+      "name": "Build Notification Message Failure",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2860,
+        -20
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "sendMessage",
+        "chatId": "={{ $('Validate Client Config').first().json.config.notifications.telegram.chatId }}",
+        "text": "={{ $json.text }}",
+        "additionalFields": {
+          "parse_mode": "HTML",
+          "appendAttribution": false
+        }
+      },
+      "id": "b82aa0ef-6e5d-4cb0-838a-afa40d5e4e61",
+      "name": "Notification Adapter - Telegram",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        2860,
+        -160
+      ],
+      "onError": "continueErrorOutput",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const context = $('Build Notification Message').first().json;\nreturn [{\n  json: {\n    ...context,\n    notifications: {\n      enabled: true,\n      status: 'sent',\n      channels: context.config.notifications.channels,\n    },\n    hasWarning: Boolean(context.hasWarning),\n  },\n}];"
+      },
+      "id": "e1ed1a17-1053-47fd-89c9-9d090873fe33",
+      "name": "Build Notifications Sent",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3080,
+        -160
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const context = $('Build Notification Message').first().json;\nconst input = $input.first().json;\nconst rawError = input.error;\nconst detail = typeof rawError === 'string'\n  ? rawError\n  : (rawError && (rawError.message || rawError.description)) || input.message || 'Telegram send failed';\nreturn [{\n  json: {\n    ...context,\n    notifications: {\n      enabled: true,\n      status: 'failed',\n      channels: context.config.notifications.channels,\n      error: String(detail).slice(0, 1000),\n    },\n    warnings: [...(context.warnings || []), 'notification_send_failed'],\n    hasWarning: true,\n  },\n}];"
+      },
+      "id": "889844ea-66ba-4b60-949a-8621ef778929",
+      "name": "Build Notification Warning",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3080,
+        -320
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const context = $input.first().json;\nreturn [{\n  json: {\n    ...context,\n    notifications: { enabled: false, status: 'disabled', channels: [] },\n    hasWarning: Boolean(context.hasWarning),\n  },\n}];"
+      },
+      "id": "ced7a972-b4d8-405f-ae7c-6491311a8123",
+      "name": "Build Notifications Disabled",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2640,
+        40
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const context = $input.first().json;\nconst { lead, meta, crm, config } = context;\nconst journal = context.journal || { enabled: false, status: 'disabled' };\nconst notifications = context.notifications || { enabled: false, status: 'disabled', channels: [] };\nconst warnings = Array.isArray(context.warnings) ? [...context.warnings] : [];\nconst saved = ['created', 'updated'].includes(crm.status) || journal.status === 'saved';\nconst notified = notifications.status === 'sent';\nlet status = crm.status;\nif (crm.status === 'skipped') status = 'crm_skipped';\nif (notifications.status === 'failed') {\n  if (crm.status === 'created') status = 'saved_with_notification_error';\n  else if (crm.status === 'updated') status = 'updated_with_notification_error';\n  else if (crm.status === 'skipped') status = 'crm_skipped_with_notification_error';\n}\nconst httpStatus = crm.httpStatus || (crm.status === 'updated' ? 200 : crm.status === 'skipped' ? 202 : 201);\nconst response = {\n  ok: crm.status !== 'failed',\n  status,\n  requestId: meta.requestId,\n  externalId: lead.externalId,\n  saved,\n  notified,\n  crm: {\n    provider: crm.provider,\n    status: crm.status,\n    contactId: crm.contactId || null,\n    matchedBy: crm.matchedBy || null,\n    matchCount: crm.matchCount || 0,\n    reason: crm.reason || null,\n  },\n  journal: { enabled: journal.enabled, status: journal.status },\n  notifications: {\n    enabled: notifications.enabled,\n    status: notifications.status,\n    channels: notifications.channels || [],\n  },\n  warnings,\n};\nreturn [{ json: { response, httpStatus, hasWarning: Boolean(context.hasWarning) } }];"
+      },
+      "id": "d8e6b0ee-029e-41df-8688-865ab8a5ddc6",
+      "name": "Build Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3300,
+        -80
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json.response }}",
+        "options": {
+          "responseCode": "={{ $json.httpStatus }}",
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Content-Type",
+                "value": "application/json"
+              }
+            ]
+          }
+        }
+      },
+      "id": "f9731103-5fec-4c84-aa57-195080e802b4",
+      "name": "Respond Lead Intake",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        3520,
+        -80
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "33653b8c-5d6d-495c-94ad-8b5dfe557c29",
+              "leftValue": "={{ $json.hasWarning }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "2a2f649a-714e-4d04-8dd1-04cb9e904889",
+      "name": "Has Warning?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        3740,
+        -80
+      ]
+    },
+    {
+      "parameters": {
+        "errorType": "errorMessage",
+        "errorMessage": "={{ 'Lead accepted with partial integration failure. See execution ' + $execution.id + '.' }}"
+      },
+      "id": "5ce9f3f4-3b36-4713-872e-c63727b6d316",
+      "name": "Stop With Partial Error",
+      "type": "n8n-nodes-base.stopAndError",
+      "typeVersion": 1,
+      "position": [
+        3960,
+        -80
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const input = $input.first().json;\nconst rawError = input.error;\nconst detail = typeof rawError === 'string'\n  ? rawError\n  : (rawError && (rawError.message || rawError.description)) || input.message || 'Configuration error';\nconst requestId = $execution && $execution.id ? String($execution.id) : null;\nreturn [{\n  json: {\n    response: {\n      ok: false,\n      error: 'configuration_error',\n      message: 'Lead intake is not configured correctly or the request could not be normalized.',\n      detail: String(detail).slice(0, 800),\n      requestId,\n    },\n  },\n}];"
+      },
+      "id": "1df48f15-784c-4ac3-b8d7-22ed72df8b7f",
       "name": "Build Config Error Response",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        500,
-        560
+        -1320,
+        360
       ]
     },
     {
@@ -469,13 +1081,13 @@
           }
         }
       },
-      "id": "95710eea-2309-449e-a3d3-a2edb097e328",
+      "id": "d77951ad-1086-4f91-b5f2-c38f49f9892b",
       "name": "Respond 500 Config Error",
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1.5,
       "position": [
-        720,
-        560
+        -1100,
+        360
       ]
     },
     {
@@ -483,13 +1095,13 @@
         "errorType": "errorMessage",
         "errorMessage": "={{ 'Lead intake configuration error. See execution ' + $execution.id + '.' }}"
       },
-      "id": "19d66028-c227-45c3-b4b0-74dedf27f2a6",
+      "id": "5304059f-0295-40f5-913f-20a6602839c0",
       "name": "Stop With Config Error",
       "type": "n8n-nodes-base.stopAndError",
       "typeVersion": 1,
       "position": [
-        940,
-        560
+        -880,
+        360
       ]
     }
   ],
@@ -593,7 +1205,7 @@
       "main": [
         [
           {
-            "node": "Map Lead To CRM Payload",
+            "node": "CRM Provider Is HubSpot?",
             "type": "main",
             "index": 0
           }
@@ -607,7 +1219,54 @@
         ]
       ]
     },
-    "Map Lead To CRM Payload": {
+    "Build Validation Response": {
+      "main": [
+        [
+          {
+            "node": "Respond 400 Validation Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CRM Provider Is HubSpot?": {
+      "main": [
+        [
+          {
+            "node": "Prepare HubSpot Contact",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "CRM Provider Is Google Sheets?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CRM Provider Is Google Sheets?": {
+      "main": [
+        [
+          {
+            "node": "Map CRM Sheet Row",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build No CRM Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Map CRM Sheet Row": {
       "main": [
         [
           {
@@ -629,6 +1288,351 @@
       "main": [
         [
           {
+            "node": "Normalize Google Sheets CRM Result",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build CRM Failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Google Sheets CRM Result": {
+      "main": [
+        [
+          {
+            "node": "Build Journal Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare HubSpot Contact": {
+      "main": [
+        [
+          {
+            "node": "HubSpot Search Needed?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HubSpot Search Needed?": {
+      "main": [
+        [
+          {
+            "node": "HubSpot Search Contact",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build HubSpot Skipped Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HubSpot Search Contact": {
+      "main": [
+        [
+          {
+            "node": "Resolve HubSpot Match",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build CRM Failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Resolve HubSpot Match": {
+      "main": [
+        [
+          {
+            "node": "HubSpot Can Upsert?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HubSpot Can Upsert?": {
+      "main": [
+        [
+          {
+            "node": "HubSpot Action Is Update?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build HubSpot Skipped Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HubSpot Action Is Update?": {
+      "main": [
+        [
+          {
+            "node": "HubSpot Update Contact",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "HubSpot Create Contact",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HubSpot Create Contact": {
+      "main": [
+        [
+          {
+            "node": "Normalize HubSpot Result",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build CRM Failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HubSpot Update Contact": {
+      "main": [
+        [
+          {
+            "node": "Normalize HubSpot Result",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build CRM Failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize HubSpot Result": {
+      "main": [
+        [
+          {
+            "node": "Build Journal Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build HubSpot Skipped Result": {
+      "main": [
+        [
+          {
+            "node": "Build Journal Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build No CRM Result": {
+      "main": [
+        [
+          {
+            "node": "Build Journal Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build CRM Failure": {
+      "main": [
+        [
+          {
+            "node": "Errors Enabled?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Errors Enabled?": {
+      "main": [
+        [
+          {
+            "node": "Map Error Log Row",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond CRM Failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Map Error Log Row": {
+      "main": [
+        [
+          {
+            "node": "Error Log Adapter - Google Sheets",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Error Log Adapter - Google Sheets": {
+      "main": [
+        [
+          {
+            "node": "Respond CRM Failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Respond CRM Failure": {
+      "main": [
+        [
+          {
+            "node": "Stop With Integration Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Journal Context": {
+      "main": [
+        [
+          {
+            "node": "Journal Enabled?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Journal Enabled?": {
+      "main": [
+        [
+          {
+            "node": "Map Journal Row",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Journal Disabled",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Map Journal Row": {
+      "main": [
+        [
+          {
+            "node": "Journal Adapter - Google Sheets",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Journal Adapter - Google Sheets": {
+      "main": [
+        [
+          {
+            "node": "Build Journal Saved",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Journal Warning",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Journal Saved": {
+      "main": [
+        [
+          {
+            "node": "Notifications Enabled?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Journal Warning": {
+      "main": [
+        [
+          {
+            "node": "Notifications Enabled?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Journal Disabled": {
+      "main": [
+        [
+          {
+            "node": "Notifications Enabled?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Notifications Enabled?": {
+      "main": [
+        [
+          {
             "node": "Build Notification Message",
             "type": "main",
             "index": 0
@@ -636,7 +1640,7 @@
         ],
         [
           {
-            "node": "Build CRM Failure Response",
+            "node": "Build Notifications Disabled",
             "type": "main",
             "index": 0
           }
@@ -654,7 +1658,7 @@
         ],
         [
           {
-            "node": "Build Notification Warning",
+            "node": "Build Notification Message Failure",
             "type": "main",
             "index": 0
           }
@@ -665,7 +1669,7 @@
       "main": [
         [
           {
-            "node": "Build Success Response",
+            "node": "Build Notifications Sent",
             "type": "main",
             "index": 0
           }
@@ -679,33 +1683,11 @@
         ]
       ]
     },
-    "Build Success Response": {
+    "Build Notifications Sent": {
       "main": [
         [
           {
-            "node": "Respond 201 Created",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Build Validation Response": {
-      "main": [
-        [
-          {
-            "node": "Respond 400 Validation Error",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Build CRM Failure Response": {
-      "main": [
-        [
-          {
-            "node": "Respond 502 CRM Failure",
+            "node": "Build Response",
             "type": "main",
             "index": 0
           }
@@ -716,51 +1698,62 @@
       "main": [
         [
           {
-            "node": "Respond 201 Notification Warning",
+            "node": "Build Response",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Respond 502 CRM Failure": {
+    "Build Notification Message Failure": {
       "main": [
         [
           {
-            "node": "Prepare Error Log Row",
+            "node": "Build Response",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Respond 201 Notification Warning": {
+    "Build Notifications Disabled": {
       "main": [
         [
           {
-            "node": "Prepare Error Log Row",
+            "node": "Build Response",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Prepare Error Log Row": {
+    "Build Response": {
       "main": [
         [
           {
-            "node": "Error Log Adapter - Google Sheets",
+            "node": "Respond Lead Intake",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Error Log Adapter - Google Sheets": {
+    "Respond Lead Intake": {
       "main": [
         [
           {
-            "node": "Stop With Integration Error",
+            "node": "Has Warning?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has Warning?": {
+      "main": [
+        [
+          {
+            "node": "Stop With Partial Error",
             "type": "main",
             "index": 0
           }
@@ -798,7 +1791,7 @@
     "saveDataErrorExecution": "all",
     "timezone": "UTC"
   },
-  "versionId": "7bb5ce3c-2713-4690-bfc0-8d10f0e8a861",
+  "versionId": "92ed638e-4afd-4077-b9af-cb60c6affca9",
   "meta": {
     "templateCredsSetupCompleted": false
   },

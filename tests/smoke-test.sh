@@ -87,23 +87,36 @@ PY
 
 valid_status="$(post "$VALID_LEAD_FILE" "$TMP_DIR/valid.json")"
 case "$valid_status" in
-  201)
+  200|201)
+    python3 - "$TMP_DIR/valid.json" "$valid_status" <<'PY'
+import json
+import sys
+
+body = json.load(open(sys.argv[1], encoding="utf-8"))
+http_status = sys.argv[2]
+assert body["ok"] is True, body
+assert body["saved"] is True, body
+status = body.get("status")
+if status in ("created", "updated"):
+    assert body["notified"] is True, body
+    print(f"PASS: auth -> 403; invalid -> 400; valid -> {http_status} {status} (CRM + Telegram configured)")
+elif status in ("saved_with_notification_error", "updated_with_notification_error"):
+    assert body["notified"] is False, body
+    print(f"PASS: auth -> 403; invalid -> 400; valid -> {http_status} {status} (lead saved, Telegram failed)")
+else:
+    raise AssertionError(body)
+PY
+    ;;
+  202)
     python3 - "$TMP_DIR/valid.json" <<'PY'
 import json
 import sys
 
 body = json.load(open(sys.argv[1], encoding="utf-8"))
 assert body["ok"] is True, body
-assert body["saved"] is True, body
-status = body.get("status")
-if status == "created":
-    assert body["notified"] is True, body
-    print("PASS: auth -> 403; invalid -> 400; valid -> 201 created (Google Sheets + Telegram configured)")
-elif status == "saved_with_notification_error":
-    assert body["notified"] is False, body
-    print("PASS: auth -> 403; invalid -> 400; valid -> 201 saved_with_notification_error (lead saved, Telegram failed)")
-else:
-    raise AssertionError(body)
+assert body["status"] == "crm_skipped", body
+assert isinstance(body.get("saved"), bool), body
+print("PASS: auth -> 403; invalid -> 400; valid -> 202 crm_skipped (controlled CRM skip)")
 PY
     ;;
   502)
@@ -117,11 +130,11 @@ assert body["error"] == "crm_write_failed", body
 assert body["saved"] is False, body
 PY
     echo "PASS: auth -> 403; invalid -> 400; valid -> 502 with crm_write_failed"
-    echo "NOTE: 502 means Google Sheets/Telegram credentials are not configured in this instance."
+    echo "NOTE: 502 means the selected CRM credential/integration is not configured in this instance."
     echo "      This is the expected local result; it is not a successful integration run."
     ;;
   *)
     cat "$TMP_DIR/valid.json" >&2
-    fail "valid lead returned HTTP ${valid_status}, expected 201 (configured) or 502 (integration failure)"
+    fail "valid lead returned HTTP ${valid_status}, expected 200/201/202 (configured/partial/skip) or 502 (integration failure)"
     ;;
 esac

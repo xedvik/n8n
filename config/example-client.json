@@ -1,5 +1,11 @@
 {
+  "version": 2,
   "clientName": "Example Client",
+  "source": {
+    "type": "webhook",
+    "defaultSource": "website",
+    "allowedSources": []
+  },
   "mapping": {
     "name": "name",
     "email": "email",
@@ -8,34 +14,89 @@
     "message": "message",
     "externalId": "external_id"
   },
-  "defaults": {
-    "source": "unknown"
-  },
-  "googleSheets": {
-    "spreadsheetId": "REPLACE_WITH_SPREADSHEET_ID",
-    "leadsSheetName": "Leads",
-    "errorsSheetName": "Errors",
-    "columns": {
-      "createdAt": "Created At",
-      "externalId": "External ID",
-      "name": "Name",
-      "email": "Email",
-      "phone": "Phone",
-      "source": "Source",
-      "message": "Message",
-      "requestId": "Request ID"
+  "crm": {
+    "provider": "hubspot",
+    "hubspot": {
+      "baseUrl": "https://api.hubapi.com",
+      "phoneOnlyPolicy": "skip",
+      "searchEmailProperty": "email",
+      "searchLimit": 10,
+      "propertiesToReturn": [
+        "email",
+        "phone",
+        "firstname",
+        "lastname"
+      ],
+      "propertyMapping": {
+        "email": "email",
+        "phone": "phone",
+        "firstname": "firstName",
+        "lastname": "lastName",
+        "message": "message"
+      }
     },
-    "errorColumns": {
-      "createdAt": "Created At",
-      "requestId": "Request ID",
-      "stage": "Stage",
-      "error": "Error",
-      "leadJson": "Lead JSON",
-      "executionId": "Execution ID"
+    "googleSheets": {
+      "spreadsheetId": "REPLACE_WITH_SPREADSHEET_ID",
+      "leadsSheetName": "Leads",
+      "columns": {
+        "createdAt": "Created At",
+        "externalId": "External ID",
+        "name": "Name",
+        "firstName": "First Name",
+        "lastName": "Last Name",
+        "email": "Email",
+        "phone": "Phone",
+        "source": "Source",
+        "message": "Message",
+        "requestId": "Request ID"
+      }
     }
   },
-  "telegram": {
-    "chatId": "REPLACE_WITH_CHAT_ID",
-    "messageTemplate": "New lead\n\nName: {{name}}\nEmail: {{email}}\nPhone: {{phone}}\nSource: {{source}}\nMessage: {{message}}\nExternal ID: {{externalId}}\nRequest ID: {{requestId}}"
+  "journal": {
+    "enabled": true,
+    "provider": "google_sheets",
+    "googleSheets": {
+      "spreadsheetId": "REPLACE_WITH_SPREADSHEET_ID",
+      "sheetName": "Journal",
+      "columns": {
+        "createdAt": "Created At",
+        "externalId": "External ID",
+        "name": "Name",
+        "email": "Email",
+        "phone": "Phone",
+        "source": "Source",
+        "message": "Message",
+        "requestId": "Request ID",
+        "crmProvider": "CRM Provider",
+        "crmStatus": "CRM Status",
+        "crmContactId": "CRM Contact ID"
+      }
+    }
+  },
+  "notifications": {
+    "enabled": true,
+    "channels": [
+      "telegram"
+    ],
+    "telegram": {
+      "chatId": "REPLACE_WITH_CHAT_ID",
+      "messageTemplate": "New lead\n\nName: {{name}}\nEmail: {{email}}\nPhone: {{phone}}\nSource: {{source}}\nMessage: {{message}}\nExternal ID: {{externalId}}\nRequest ID: {{requestId}}\nCRM: {{crmStatus}}"
+    }
+  },
+  "errors": {
+    "enabled": true,
+    "provider": "google_sheets",
+    "googleSheets": {
+      "spreadsheetId": "REPLACE_WITH_SPREADSHEET_ID",
+      "sheetName": "Errors",
+      "columns": {
+        "createdAt": "Created At",
+        "requestId": "Request ID",
+        "stage": "Stage",
+        "error": "Error",
+        "leadJson": "Lead JSON",
+        "executionId": "Execution ID"
+      }
+    }
   }
 }

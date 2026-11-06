@@ -5,3 +5,4 @@ config/*.local.json
 .DS_Store
 node_modules/
 .omo
+config/.client-config.*
