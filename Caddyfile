@@ -1,0 +1,28 @@
+{
+	email {$ACME_EMAIL}
+	admin off
+}
+
+{$CRM_DOMAIN} {
+	encode zstd gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "no-referrer"
+		-Server
+	}
+
+	# /setup is the wizard; redirect to the canonical trailing-slash URL.
+	redir /setup /setup/ 308
+
+	# handle_path strips /setup before forwarding to the loopback wizard.
+	handle_path /setup/* {
+		reverse_proxy 127.0.0.1:{$WIZARD_PORT:8787}
+	}
+
+	# Everything else (n8n UI, API, OAuth callbacks, webhooks) goes to n8n.
+	handle {
+		reverse_proxy 127.0.0.1:{$N8N_PORT:5678}
+	}
+}

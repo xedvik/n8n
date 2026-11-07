@@ -78,6 +78,13 @@ async function api(path, { method = 'GET', body, allowNotOk = false } = {}) {
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   const data = await response.json().catch(() => ({ ok: false, message: `HTTP ${response.status}` }));
+  if (response.status === 401 && data.error === 'auth_required') {
+    location.replace('./');
+    const error = new Error(data.message || 'Требуется авторизация.');
+    error.data = data;
+    error.status = response.status;
+    throw error;
+  }
   if (!response.ok || (!allowNotOk && data.ok === false)) {
     const error = new Error(data.message || `HTTP ${response.status}`);
     error.data = data;
@@ -96,6 +103,11 @@ function escapeHtml(value) {
   return String(value ?? '').replace(/[&<>"']/g, (char) => ({
     '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
   }[char]));
+}
+
+function n8nPublicUrl() {
+  const url = state.boot?.n8n?.publicUrl || state.boot?.n8n?.baseUrl || 'http://127.0.0.1:5678';
+  return String(url).replace(/\/+$/, '');
 }
 
 function spreadsheetId(value) {
@@ -225,6 +237,9 @@ function render() {
       : 'n8n: API key не задан'
     : 'n8n недоступен';
 
+  const logoutButton = $('#logout-btn');
+  if (logoutButton) logoutButton.classList.toggle('hidden', !state.boot?.auth?.serverMode);
+
   const stepper = $('#stepper');
   stepper.replaceChildren();
   list.forEach((step, i) => {
@@ -274,11 +289,22 @@ function renderOverview() {
     ${(data?.warnings || []).map((warning) => `<div class="notice notice-warn">${escapeHtml(warning)}</div>`).join('')}
     <div class="status-grid">
       ${statusCard('n8n', n8nOk ? 'configured' : 'error', n8nOk ? (keyOk ? `Workflow: ${data.n8n.workflowName || (data.n8n.workflowExists === false ? 'не найден' : 'неизвестен')}` : 'API key не задан') : 'Проверьте docker compose')}
-      ${statusCard('API key n8n', keyOk ? 'configured' : 'requires_auth', keyOk ? 'Автоматизация credentials доступна' : 'Можно настроить вручную')}
+      ${statusCard('API key n8n', keyOk ? 'configured' : 'requires_auth', keyOk ? 'Автоматизация credentials доступна' : (data?.auth?.serverMode ? 'Требуется подключение' : 'Можно настроить вручную'))}
       ${statusCard('CRM', data?.credentials?.hubspot?.status === 'configured' || data?.credentials?.google?.status === 'configured' ? 'configured' : 'not_configured', 'По текущему конфигу')}
       ${statusCard('PostgreSQL state', data?.credentials?.postgres?.status || 'unknown', 'Нужен для state machine')}
     </div>
-    ${keyOk ? '' : `<div class="notice notice-info" style="margin-top:16px"><strong>Автоматическое создание credentials выключено</strong>Создайте API key в n8n: <a href="${escapeHtml(data?.n8n?.baseUrl || 'http://127.0.0.1:5678')}/settings/api" target="_blank" rel="noopener">Settings → API</a>, затем перезапустите мастер с <code class="inline-code">N8N_API_KEY=... ./scripts/start-wizard.sh</code>. Конфиг можно сохранить и без ключа.</div>`}
+    ${keyOk ? '' : data?.auth?.serverMode ? `<div class="secure-connect" role="group" aria-labelledby="connect-title">
+      <h3 id="connect-title">Подключите n8n по API key</h3>
+      <p>Создайте API key в n8n: <a href="${escapeHtml(n8nPublicUrl())}/settings/api" target="_blank" rel="noopener">Settings → API</a>. Ключ отправляется только серверу мастера и не сохраняется в браузере.</p>
+      <div class="connect-row">
+        <div class="field grow">
+          <label for="n8n-api-key">API key n8n</label>
+          <input id="n8n-api-key" type="password" autocomplete="off" spellcheck="false" placeholder="n8n_api_…">
+        </div>
+        <button type="button" class="btn btn-primary" data-action="connect-n8n">Подключить n8n</button>
+      </div>
+      <span class="hint">Без подключения продолжить настройку нельзя.</span>
+    </div>` : `<div class="notice notice-info" style="margin-top:16px"><strong>Автоматическое создание credentials выключено</strong>Создайте API key в n8n: <a href="${escapeHtml(n8nPublicUrl())}/settings/api" target="_blank" rel="noopener">Settings → API</a>, затем перезапустите мастер с <code class="inline-code">N8N_API_KEY=... ./scripts/start-wizard.sh</code>. Конфиг можно сохранить и без ключа.</div>`}
     ${data?.n8n?.apiKeyConfigured && data.n8n.workflowExists === false ? `<div class="notice notice-warn" style="margin-top:16px"><strong>Workflow ещё не установлен</strong>Импортируйте v0.4 workflow в n8n, затем назначьте credentials на шаге проверки.<br><button type="button" class="btn btn-secondary btn-small" data-action="install-workflow" style="margin-top:10px">Установить workflow</button></div>` : ''}
   `;
 }
@@ -453,7 +479,7 @@ function renderGoogle() {
         <div class="field"><label for="google-client-id">Client ID</label><input id="google-client-id" data-model="google.clientId" autocomplete="off"></div>
         <div class="field"><label for="google-client-secret">Client Secret</label><input id="google-client-secret" type="password" data-model="google.clientSecret" autocomplete="off"></div>
       </div>
-      <div class="notice notice-warn" style="margin-top:12px">Создайте credential в n8n и нажмите Connect. Redirect URI: <span class="code"><code>${escapeHtml((state.boot?.n8n?.baseUrl || 'http://127.0.0.1:5678'))}/rest/oauth2-credential/callback</code></span></div>`}
+      <div class="notice notice-warn" style="margin-top:12px">Создайте credential в n8n и нажмите Connect. Redirect URI: <span class="code"><code>${escapeHtml(n8nPublicUrl())}/rest/oauth2-credential/callback</code></span></div>`}
     <div class="inline" style="margin-top:16px">
       <button type="button" class="btn btn-secondary" data-action="test-google">Проверить таблицу</button>
       <a class="btn btn-ghost btn-small" href="https://console.cloud.google.com/apis/library/sheets.googleapis.com" target="_blank" rel="noopener">Включить Sheets API</a>
@@ -542,7 +568,7 @@ function renderManualCredentials() {
       ${summaryRow('HubSpot Service Key', 'HubSpot Search/Create/Update Contact')}
       ${summaryRow('Telegram API', 'Notification Adapter - Telegram')}
     </div>
-    <a class="btn btn-secondary btn-small" href="${escapeHtml((state.boot?.n8n?.baseUrl || 'http://127.0.0.1:5678'))}/home/credentials" target="_blank" rel="noopener">Открыть Credentials в n8n</a>
+    <a class="btn btn-secondary btn-small" href="${escapeHtml(n8nPublicUrl())}/home/credentials" target="_blank" rel="noopener">Открыть Credentials в n8n</a>
   </div>`;
 }
 
@@ -722,6 +748,9 @@ function buildConfig() {
 }
 
 function validateStep(step) {
+  if (step === 'overview' && state.boot?.auth?.serverMode && !state.boot?.n8n?.apiKeyConfigured) {
+    return 'Подключите n8n API key, чтобы продолжить настройку.';
+  }
   if (step === 'client') {
     if (!state.company.trim()) return 'Укажите название компании.';
     if (!timezoneValid(state.timezone)) return 'Выберите корректный часовой пояс IANA.';
@@ -796,7 +825,7 @@ function refsForApi() {
 async function createCredentials() {
   if (!state.boot?.n8n?.apiKeyConfigured) return false;
   const ensure = async (kind, values = {}, existing = null, replace = false) => {
-    const result = await api('/api/credentials', {
+    const result = await api('api/credentials', {
       method: 'POST',
       body: { kind, values, ...(existing && !replace ? { existingId: existing.id } : {}), replaceExisting: replace },
     });
@@ -847,8 +876,8 @@ async function saveConfigOnly() {
   render();
   try {
     const config = buildConfig();
-    const validated = await api('/api/config/validate', { method: 'POST', body: { config } });
-    const saved = await api('/api/config', { method: 'POST', body: { config: validated.config } });
+    const validated = await api('api/config/validate', { method: 'POST', body: { config } });
+    const saved = await api('api/config', { method: 'POST', body: { config: validated.config } });
     state.baseConfig = saved.config;
     state.boot.config = saved.config;
     state.boot.hasConfig = true;
@@ -867,18 +896,18 @@ async function saveAndApply() {
   render();
   try {
     const config = buildConfig();
-    const validated = await api('/api/config/validate', { method: 'POST', body: { config } });
-    const saved = await api('/api/config', { method: 'POST', body: { config: validated.config } });
+    const validated = await api('api/config/validate', { method: 'POST', body: { config } });
+    const saved = await api('api/config', { method: 'POST', body: { config: validated.config } });
     state.baseConfig = saved.config;
     state.boot.config = saved.config;
     state.boot.hasConfig = true;
 
     if (state.boot.n8n.apiKeyConfigured) {
       await createCredentials();
-      const applied = await api('/api/workflow/apply', { method: 'POST', body: { credentials: refsForApi() } });
+      const applied = await api('api/workflow/apply', { method: 'POST', body: { credentials: refsForApi() } });
       state.workflow = applied.workflow;
       toast('Конфигурация и credentials применены к workflow.');
-      const doctor = await api('/api/doctor', { method: 'POST', body: { integrationTest: false }, allowNotOk: true });
+      const doctor = await api('api/doctor', { method: 'POST', body: { integrationTest: false }, allowNotOk: true });
       state.doctor = doctor;
       toast(doctor.result === 'PASS' ? 'doctor: PASS' : 'doctor не подтвердил настройку. Смотрите отчёт.', doctor.result === 'PASS' ? '' : 'error');
     } else {
@@ -899,7 +928,7 @@ async function runDoctor(integrationTest = false) {
   state.busy = true;
   render();
   try {
-    const result = await api('/api/doctor', {
+    const result = await api('api/doctor', {
       method: 'POST',
       body: { integrationTest, confirm: integrationTest ? true : undefined },
       allowNotOk: true,
@@ -927,11 +956,11 @@ async function testIntegration(kind) {
         toast('OAuth2 проверяется через сохранённый credential после Connect.');
         return;
       }
-      state.hubspot.test = await api('/api/integrations/test', { method: 'POST', body: { kind, values } });
+      state.hubspot.test = await api('api/integrations/test', { method: 'POST', body: { kind, values } });
     }
     if (kind === 'telegram') {
       values = { token: state.telegram.token, chatId: state.telegram.chatId };
-      state.telegram.test = await api('/api/integrations/test', { method: 'POST', body: { kind, values } });
+      state.telegram.test = await api('api/integrations/test', { method: 'POST', body: { kind, values } });
     }
     if (kind === 'google') {
       if (state.google.mode === 'oauth2') {
@@ -947,7 +976,7 @@ async function testIntegration(kind) {
         spreadsheetId: spreadsheetId(state.google.mainUrl),
         sheetNames: [state.google.leadsSheet, state.google.journalSheet, state.google.errorsSheet].filter(Boolean),
       };
-      state.google.test = await api('/api/integrations/test', { method: 'POST', body: { kind: 'google_service_account', values } });
+      state.google.test = await api('api/integrations/test', { method: 'POST', body: { kind: 'google_service_account', values } });
     }
     toast(state.hubspot.test?.message || state.telegram.test?.message || state.google.test?.message || 'Проверка завершена.');
   } catch (error) {
@@ -966,7 +995,7 @@ async function testExisting(kind) {
   state.busy = true;
   render();
   try {
-    const result = await api(`/api/credentials/${encodeURIComponent(ref.id)}/test`, { method: 'POST', body: {}, allowNotOk: true });
+    const result = await api(`api/credentials/${encodeURIComponent(ref.id)}/test`, { method: 'POST', body: {}, allowNotOk: true });
     if (kind === 'hubspot') state.hubspot.test = result;
     if (kind === 'telegram') state.telegram.test = result;
     if (kind === 'google') state.google.test = result;
@@ -1028,6 +1057,41 @@ document.addEventListener('click', async (event) => {
   if (!action) return;
   if (action === 'next') goNext();
   if (action === 'back') goBack();
+  if (action === 'connect-n8n') {
+    const input = $('#n8n-api-key');
+    const apiKey = (input?.value || '').trim();
+    if (!apiKey) {
+      toast('Введите API key n8n.', 'error');
+      input?.focus();
+      return;
+    }
+    target.disabled = true;
+    const label = target.textContent;
+    target.textContent = 'Подключаю…';
+    try {
+      await api('api/n8n/connect', { method: 'POST', body: { apiKey } });
+      if (input) input.value = '';
+      const boot = await api('api/bootstrap');
+      applyBootstrap(boot);
+      state.error = null;
+      toast('n8n API key подключён.');
+      render();
+    } catch (error) {
+      target.disabled = false;
+      target.textContent = label;
+      toast(errorMessage(error), 'error');
+    }
+    return;
+  }
+  if (action === 'logout') {
+    try {
+      await api('api/auth/logout', { method: 'POST' });
+    } catch {
+      // api() уже перенаправляет на страницу входа при 401.
+    }
+    location.replace('./');
+    return;
+  }
   if (action === 'save-only') await saveConfigOnly();
   if (action === 'save-apply') await saveAndApply();
   if (action === 'doctor') await runDoctor(false);
@@ -1053,8 +1117,8 @@ document.addEventListener('click', async (event) => {
     state.busy = true;
     render();
     try {
-      const result = await api('/api/workflow/install', { method: 'POST', body: { confirm: true } });
-      const boot = await api('/api/bootstrap');
+      const result = await api('api/workflow/install', { method: 'POST', body: { confirm: true } });
+      const boot = await api('api/bootstrap');
       state.boot = boot;
       toast(result.message || 'Workflow установлен.');
     } catch (error) {
@@ -1095,7 +1159,7 @@ document.addEventListener('change', (event) => {
 
 (async function init() {
   try {
-    const data = await api('/api/bootstrap');
+    const data = await api('api/bootstrap');
     applyBootstrap(data);
     render();
   } catch (error) {

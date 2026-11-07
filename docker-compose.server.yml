@@ -1,0 +1,37 @@
+# Single-domain server deployment overlay.
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.server.yml up -d
+#
+# Caddy uses network_mode: host on Linux so it can reach n8n and the wizard on
+# loopback only. n8n stays bound to 127.0.0.1; PostgreSQL publishes no ports.
+
+services:
+  n8n:
+    ports:
+      - "127.0.0.1:${N8N_PORT:-5678}:5678"
+    environment:
+      N8N_PROXY_HOPS: "1"
+
+  caddy:
+    image: caddy:2.10-alpine
+    restart: unless-stopped
+    # Host networking is required to reach 127.0.0.1:5678 and 127.0.0.1:8787
+    # from inside the container on a Linux VPS.
+    network_mode: host
+    depends_on:
+      n8n:
+        condition: service_healthy
+    environment:
+      CRM_DOMAIN: ${CRM_DOMAIN:?Set CRM_DOMAIN in .env}
+      ACME_EMAIL: ${ACME_EMAIL:?Set ACME_EMAIL in .env}
+      N8N_PORT: ${N8N_PORT:-5678}
+      WIZARD_PORT: ${WIZARD_PORT:-8787}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  caddy_data:
+  caddy_config:

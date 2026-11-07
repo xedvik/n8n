@@ -12,6 +12,19 @@ import {
 } from './lib/config.mjs';
 import { N8nApi, N8nApiError, defaultN8nBaseUrl } from './lib/n8n-api.mjs';
 import {
+  authStatus,
+  clearSessionCookie,
+  initAuth,
+  isServerMode,
+  loadStoredN8nKey,
+  loginAdmin,
+  registerAdmin,
+  revokeSessions,
+  saveStoredN8nKey,
+  sessionCookie,
+  verifySession,
+} from './lib/auth.mjs';
+import {
   ensureCredential,
   n8nCredentialsUrl,
   testIntegration,
@@ -36,12 +49,31 @@ const PUBLIC_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), 'publ
 const HOST = process.env.WIZARD_HOST || '127.0.0.1';
 const PORT = Number(process.env.WIZARD_PORT || 8787);
 const ALLOW_REMOTE = process.env.WIZARD_ALLOW_REMOTE === '1';
+const SERVER_MODE = isServerMode();
 const TOKEN = makeToken();
-const api = new N8nApi({ baseUrl: defaultN8nBaseUrl() });
+let api = new N8nApi({ baseUrl: defaultN8nBaseUrl() });
 const N8N_URL = api.baseUrl;
+const N8N_PUBLIC_URL = String(process.env.N8N_PUBLIC_URL || N8N_URL).replace(/\/+$/, '');
 
 if (!ALLOW_REMOTE && !['127.0.0.1', 'localhost', '::1'].includes(HOST)) {
   throw new Error('WIZARD_HOST должен быть loopback. Для удалённого доступа задайте WIZARD_ALLOW_REMOTE=1.');
+}
+
+try {
+  await initAuth();
+} catch (error) {
+  console.error(`CRM Setup Wizard: ${error.message}`);
+  process.exit(1);
+}
+
+if (SERVER_MODE && !process.env.N8N_API_KEY) {
+  try {
+    const storedKey = await loadStoredN8nKey();
+    if (storedKey) api = new N8nApi({ baseUrl: defaultN8nBaseUrl(), apiKey: storedKey });
+  } catch (error) {
+    console.error(`CRM Setup Wizard: сохранённый n8n API key недоступен (${error.code || 'error'}).`);
+    process.exit(1);
+  }
 }
 
 function statusFor(rows, types) {
@@ -64,6 +96,7 @@ async function bootstrap() {
   const reachable = await api.health();
   const n8n = {
     baseUrl: N8N_URL,
+    publicUrl: N8N_PUBLIC_URL,
     apiKeyConfigured: api.configured,
     reachable,
     workflowId: WORKFLOW_ID,
@@ -111,6 +144,7 @@ async function bootstrap() {
 
   return {
     ok: true,
+    auth: { serverMode: SERVER_MODE },
     hasConfig: current.exists,
     config: publicConfig(current.config || template),
     template: publicConfig(template),
@@ -144,22 +178,60 @@ function mapError(error) {
     validation_error: 400,
     credential_type_mismatch: 400,
     n8n_api_key_missing: 400,
+    n8n_key_env_locked: 409,
+    n8n_key_decrypt_failed: 500,
+    invalid_api_key: 400,
     confirmation_required: 400,
     body_too_large: 413,
     invalid_json: 400,
     doctor_busy: 409,
     workflow_node_missing: 500,
     workflow_invalid: 500,
+    server_mode_required: 400,
+    bootstrap_token_missing: 500,
+    invalid_bootstrap_token: 403,
+    registration_closed: 409,
+    already_configured: 409,
+    invalid_username: 400,
+    invalid_password: 400,
+    invalid_credentials: 401,
+    rate_limited: 429,
+    not_registered: 409,
+    auth_not_initialized: 500,
+    auth_state_invalid: 500,
+    session_secret_invalid: 500,
+    n8n_unreachable: 502,
+    n8n_unauthorized: 401,
+    n8n_api_error: 502,
   };
   return {
-    status: known[error.code] || 500,
+    status: known[error.code] || error.status || 500,
     code: error.code || 'internal_error',
     message: error.code ? error.message : 'Внутренняя ошибка мастера.',
   };
 }
 
+function mapN8nConnectError(error, suppliedKey) {
+  if (!(error instanceof N8nApiError)) return mapError(error);
+  const code =
+    error.code === 'n8n_unauthorized'
+      ? 'n8n_unauthorized'
+      : error.code === 'n8n_unreachable'
+        ? 'n8n_unreachable'
+        : 'n8n_api_error';
+  const status =
+    code === 'n8n_unauthorized'
+      ? 401
+      : code === 'n8n_unreachable'
+        ? 502
+        : error.status >= 400 && error.status <= 599
+          ? error.status
+          : 502;
+  return { status, code, message: sanitizeText(error.message, [suppliedKey]) };
+}
+
 function localRequest(req, res) {
-  if (!ALLOW_REMOTE && !isLoopback(req.socket.remoteAddress)) {
+  if (!SERVER_MODE && !ALLOW_REMOTE && !isLoopback(req.socket.remoteAddress)) {
     sendError(res, 403, 'forbidden', 'Мастер доступен только локально.');
     return false;
   }
@@ -168,6 +240,26 @@ function localRequest(req, res) {
     return false;
   }
   return true;
+}
+
+function requireSession(req, res) {
+  if (!SERVER_MODE) return true;
+  if (verifySession(req)) return true;
+  sendError(res, 401, 'auth_required', 'Требуется вход в мастер.');
+  return false;
+}
+
+function clientIp(req) {
+  const socketIp = String(req.socket.remoteAddress || 'unknown');
+  const forwarded = req.headers['x-forwarded-for'];
+  if (forwarded && (isLoopback(socketIp) || process.env.WIZARD_TRUST_PROXY === '1')) {
+    const entries = String(forwarded)
+      .split(',')
+      .map((value) => value.trim())
+      .filter(Boolean);
+    if (entries.length) return entries[entries.length - 1];
+  }
+  return socketIp;
 }
 
 function requireToken(req, res) {
@@ -202,11 +294,76 @@ async function readBody(req, res) {
   }
 }
 
+async function handleAuthPost(req, res, url) {
+  if (!requireToken(req, res)) return true;
+  const body = await readBody(req, res);
+  if (!body) return true;
+  try {
+    if (url.pathname === '/api/auth/register') {
+      const created = await registerAdmin({
+        token: body.token,
+        username: body.username,
+        password: body.password,
+        ip: clientIp(req),
+      });
+      const session = await loginAdmin({
+        username: created.username,
+        password: body.password,
+        ip: clientIp(req),
+      });
+      sendJson(
+        res,
+        200,
+        { ok: true, registered: true, username: session.username },
+        { 'Set-Cookie': sessionCookie(session.token) },
+      );
+      return true;
+    }
+    if (url.pathname === '/api/auth/login') {
+      const session = await loginAdmin({
+        username: body.username,
+        password: body.password,
+        ip: clientIp(req),
+      });
+      sendJson(
+        res,
+        200,
+        { ok: true, username: session.username },
+        { 'Set-Cookie': sessionCookie(session.token) },
+      );
+      return true;
+    }
+    if (url.pathname === '/api/auth/logout') {
+      if (verifySession(req)) await revokeSessions();
+      sendJson(res, 200, { ok: true }, { 'Set-Cookie': clearSessionCookie() });
+      return true;
+    }
+  } catch (error) {
+    const mapped = mapError(error);
+    sendError(res, mapped.status, mapped.code, mapped.message);
+  }
+  return true;
+}
+
 async function handleApi(req, res, url) {
   if (req.method === 'GET' && url.pathname === '/api/health') {
     sendJson(res, 200, { ok: true });
     return true;
   }
+  if (req.method === 'GET' && url.pathname === '/api/auth/status') {
+    sendJson(res, 200, { ok: true, ...authStatus(req) });
+    return true;
+  }
+  if (
+    SERVER_MODE &&
+    req.method === 'POST' &&
+    (url.pathname === '/api/auth/register' ||
+      url.pathname === '/api/auth/login' ||
+      url.pathname === '/api/auth/logout')
+  ) {
+    return handleAuthPost(req, res, url);
+  }
+  if (!requireSession(req, res)) return true;
   if (req.method === 'GET' && url.pathname === '/api/bootstrap') {
     sendJson(res, 200, await bootstrap());
     return true;
@@ -269,7 +426,7 @@ async function handleApi(req, res, url) {
         status: result.status,
         reused: result.reused,
         requiresAuthorization: Boolean(result.requiresAuthorization),
-        n8nUrl: result.requiresAuthorization ? n8nCredentialsUrl(N8N_URL) : null,
+        n8nUrl: result.requiresAuthorization ? n8nCredentialsUrl(N8N_PUBLIC_URL) : null,
         message: result.requiresAuthorization
           ? 'Credential создан. Откройте n8n и нажмите Connect для OAuth.'
           : result.reused
@@ -369,6 +526,46 @@ async function handleApi(req, res, url) {
     }
     return true;
   }
+  if (SERVER_MODE && req.method === 'POST' && url.pathname === '/api/n8n/connect') {
+    if (!requireToken(req, res)) return true;
+    const body = await readBody(req, res);
+    if (!body) return true;
+    const suppliedKey = typeof body.apiKey === 'string' ? body.apiKey.trim() : '';
+    if (!suppliedKey || Buffer.byteLength(suppliedKey, 'utf8') > 4096) {
+      sendError(res, 400, 'invalid_api_key', 'Укажите корректный n8n API key (не более 4096 символов).');
+      return true;
+    }
+    if (process.env.N8N_API_KEY) {
+      sendError(
+        res,
+        409,
+        'n8n_key_env_locked',
+        'N8N_API_KEY задан через окружение и имеет приоритет. Ключ не сохранён.',
+      );
+      return true;
+    }
+    try {
+      const candidate = new N8nApi({ baseUrl: defaultN8nBaseUrl(), apiKey: suppliedKey });
+      if (!(await candidate.health())) {
+        throw new N8nApiError('n8n недоступен. Проверьте, что контейнер запущен.', {
+          status: 502,
+          code: 'n8n_unreachable',
+        });
+      }
+      await candidate.listCredentials();
+      await saveStoredN8nKey(suppliedKey);
+      api = candidate;
+      sendJson(res, 200, {
+        ok: true,
+        apiKeyConfigured: true,
+        message: 'n8n API key подключён и сохранён в зашифрованном виде.',
+      });
+    } catch (error) {
+      const mapped = mapN8nConnectError(error, suppliedKey);
+      sendError(res, mapped.status, mapped.code, mapped.message);
+    }
+    return true;
+  }
   return false;
 }
 
@@ -380,6 +577,14 @@ const STATIC_FILES = new Map([
   ['/favicon.svg', 'favicon.svg'],
 ]);
 
+const LOGIN_FILES = new Map([
+  ['/login.html', 'login.html'],
+  ['/login.js', 'login.js'],
+  ['/login.css', 'login.css'],
+]);
+const SERVER_STATIC_FILES = new Map([...STATIC_FILES, ...LOGIN_FILES]);
+const PUBLIC_STATIC = new Set(['/login.html', '/login.js', '/login.css', '/styles.css', '/favicon.svg']);
+
 const MIME = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
@@ -387,19 +592,28 @@ const MIME = {
   '.svg': 'image/svg+xml',
 };
 
-async function serveStatic(req, res, pathname) {
-  const file = STATIC_FILES.get(pathname);
-  if (!file) {
-    sendError(res, 404, 'not_found', 'Страница не найдена.');
-    return;
+function staticFiles() {
+  return SERVER_MODE ? SERVER_STATIC_FILES : STATIC_FILES;
+}
+
+async function serveFile(req, res, file) {
+  let body;
+  try {
+    body = await fs.readFile(path.join(PUBLIC_DIR, file));
+  } catch (error) {
+    if (error.code === 'ENOENT') {
+      sendError(res, 404, 'not_found', 'Страница не найдена.');
+      return;
+    }
+    throw error;
   }
-  let body = await fs.readFile(path.join(PUBLIC_DIR, file));
-  if (file === 'index.html') {
+  if (file.endsWith('.html')) {
     const html = body.toString('utf8');
     const tokenMeta = `<meta name="wizard-token" content="${TOKEN}">`;
+    const existingMeta = /<meta\b[^>]*\bname=["']wizard-token["'][^>]*>/i;
     body = Buffer.from(
-      html.includes('<meta name="wizard-token"')
-        ? html.replace(/<meta name="wizard-token" content="[^"]*">/, tokenMeta)
+      existingMeta.test(html)
+        ? html.replace(existingMeta, tokenMeta)
         : html.replace('</head>', `${tokenMeta}\n</head>`),
     );
   }
@@ -412,6 +626,39 @@ async function serveStatic(req, res, pathname) {
   res.end(req.method === 'HEAD' ? undefined : body);
 }
 
+async function serveStatic(req, res, pathname) {
+  const file = staticFiles().get(pathname);
+  if (!file) {
+    sendError(res, 404, 'not_found', 'Страница не найдена.');
+    return;
+  }
+  await serveFile(req, res, file);
+}
+
+async function serveStaticRequest(req, res, pathname) {
+  if (!SERVER_MODE) {
+    await serveStatic(req, res, pathname);
+    return;
+  }
+  if (verifySession(req)) {
+    await serveStatic(req, res, pathname);
+    return;
+  }
+  if (pathname === '/' || pathname === '/index.html') {
+    await serveFile(req, res, 'login.html');
+    return;
+  }
+  if (PUBLIC_STATIC.has(pathname)) {
+    await serveStatic(req, res, pathname);
+    return;
+  }
+  if (staticFiles().has(pathname)) {
+    sendError(res, 401, 'auth_required', 'Требуется вход в мастер.');
+    return;
+  }
+  sendError(res, 404, 'not_found', 'Страница не найдена.');
+}
+
 const server = http.createServer(async (req, res) => {
   try {
     if (!localRequest(req, res)) return;
@@ -420,7 +667,7 @@ const server = http.createServer(async (req, res) => {
       if (url.pathname.startsWith('/api/')) {
         if (await handleApi(req, res, url)) return;
       } else {
-        await serveStatic(req, res, url.pathname);
+        await serveStaticRequest(req, res, url.pathname);
         return;
       }
     } else if (await handleApi(req, res, url)) {
@@ -430,7 +677,12 @@ const server = http.createServer(async (req, res) => {
   } catch (error) {
     const mapped = mapError(error);
     if (!res.headersSent) {
-      sendError(res, mapped.status, mapped.code, sanitizeText(mapped.message, [process.env.N8N_API_KEY]));
+      sendError(
+        res,
+        mapped.status,
+        mapped.code,
+        sanitizeText(mapped.message, [process.env.N8N_API_KEY, api.apiKey]),
+      );
     } else {
       res.destroy();
     }
@@ -440,6 +692,7 @@ const server = http.createServer(async (req, res) => {
 server.requestTimeout = 190_000;
 server.listen(PORT, HOST, () => {
   console.log(`CRM Setup Wizard: http://${HOST}:${PORT}`);
+  console.log(`Режим: ${SERVER_MODE ? 'server' : 'local'}`);
   console.log(`n8n API: ${api.configured ? N8N_URL : 'ключ не задан (ручной режим credentials)'}`);
-  if (api.configured) console.log(`API key настроен; откройте ${n8nCredentialsUrl(N8N_URL)} для OAuth Connect.`);
+  if (api.configured) console.log(`API key настроен; откройте ${n8nCredentialsUrl(N8N_PUBLIC_URL)} для OAuth Connect.`);
 });

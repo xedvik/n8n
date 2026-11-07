@@ -1,4 +1,4 @@
-# Web Setup Wizard v0.4
+# Web Setup Wizard v0.4.1
 
 Требования: Node.js 22 на хосте и запущенный Docker Compose.
 
@@ -24,6 +24,22 @@ WIZARD_PORT=8788 ./scripts/start-wizard.sh
 
 Остановка — `Ctrl+C`.
 
+## Серверный режим
+
+На VPS мастер работает на том же домене: `https://<domain>/setup/`. Публичная точка —
+Caddy; n8n остаётся на loopback. Первый администратор создаётся через одноразовый
+bootstrap-токен из вывода установщика, дальнейшие входы — по паролю. Сессия хранится
+в HttpOnly/SameSite=Strict cookie, подписанной HMAC; logout отзывает текущую версию
+сессий. Регистрация после первого администратора закрыта.
+
+n8n API key вводится в браузере на шаге «Обзор», проверяется server-side и сохраняется
+в `wizard-data/n8n-api-key.enc` (AES-256-GCM; ключ шифрования — `WIZARD_SECRET_KEY`).
+Сам API key никогда не возвращается в bootstrap/API и не пишется в браузерное storage.
+Это защищает от утечки файлов/backup, но не от полного компрометирования root на хосте:
+используйте full-disk encryption и ограниченный доступ.
+
+Установка и first-run URL: [SERVER.md](SERVER.md).
+
 ## API key n8n
 
 Автоматическое создание credentials и назначение их workflow требуют public API key n8n.
@@ -36,9 +52,10 @@ WIZARD_PORT=8788 ./scripts/start-wizard.sh
    - `credential:list`
    - `credential:read`
    - `credential:create`
-3. Запустите мастер с `N8N_API_KEY` или введите ключ в приглашении.
+3. Локально запустите мастер с `N8N_API_KEY` или введите ключ в приглашении. В серверном
+   режиме введите ключ через UI на шаге «Обзор»; он сохранится на сервере в зашифрованном виде.
 
-Ключ передаётся только server-side в заголовке `X-N8N-API-KEY`. В браузер, DOM, localStorage, sessionStorage и логи он не попадает. Без ключа мастер работает в ручном режиме: конфиг сохраняется, а credentials назначаются в n8n по инструкции на шаге «Проверка».
+Ключ передаётся только server-side в заголовке `X-N8N-API-KEY`. В браузер, DOM, localStorage, sessionStorage и логи он не попадает. Без ключа локальный мастер работает в ручном режиме: конфиг сохраняется, а credentials назначаются в n8n по инструкции на шаге «Проверка». В серверном режиме без подключения n8n ключа переход к настройке заблокирован.
 
 ## Что делает мастер
 
@@ -54,19 +71,24 @@ WIZARD_PORT=8788 ./scripts/start-wizard.sh
 
 ## Безопасность
 
-- Сервер слушает `127.0.0.1`. Удалённый доступ требует одновременно `WIZARD_ALLOW_REMOTE=1` и явного `WIZARD_ALLOWED_HOSTS`; это не рекомендуется.
+- Локально сервер слушает `127.0.0.1`. В серверном режиме снаружи доступен только Caddy, а мастер проксируется через `/setup/`; прямой доступ к `8787` закрыт loopback-биндингом.
 - POST-запросы защищены случайным `X-Wizard-Token`, который вставляется в HTML meta и меняется при каждом запуске.
-- Проверяются loopback-адрес, `Host`, `Origin`, `Content-Type`; тело ограничено 2 МБ.
+- Проверяются `Host`, `Origin`, `Content-Type`; тело ограничено 2 МБ. Cookie сессии — HttpOnly, SameSite=Strict, Secure в server mode.
 - Конфиг сохраняется атомарно, mode `0600`, с backup `config/.client-config.<timestamp>.json`; невалидный конфиг не записывается.
-- API key и credential data никогда не возвращаются в API-ответах и не логируются.
-- OAuth2 credentials создаются, но требуют ручного Connect в n8n: `${N8N_URL}/home/credentials`.
+- API key и credential data никогда не возвращаются в API-ответах и не логируются. В server mode n8n API key шифруется на диске.
+- OAuth2 credentials создаются, но требуют ручного Connect в n8n: локально `${N8N_URL}/home/credentials`, в server mode `https://<domain>/home/credentials`.
 
 ## API
 
 | Метод | Путь | Назначение |
 |---|---|---|
-| GET | `/api/health` | healthcheck |
+| GET | `/api/health` | healthcheck (без авторизации) |
+| GET | `/api/auth/status` | состояние первого администратора/сессии |
+| POST | `/api/auth/register` | одноразовая регистрация первого администратора |
+| POST | `/api/auth/login` | вход администратора |
+| POST | `/api/auth/logout` | выход и отзыв сессий |
 | GET | `/api/bootstrap` | состояние конфига, n8n, credentials |
+| POST | `/api/n8n/connect` | проверить и сохранить n8n API key (server mode) |
 | POST | `/api/config/validate` | проверка конфига |
 | POST | `/api/config` | атомарное сохранение с backup |
 | GET | `/api/credentials?type=` | metadata credentials; без API key возвращает 400 |
@@ -77,7 +99,9 @@ WIZARD_PORT=8788 ./scripts/start-wizard.sh
 | POST | `/api/workflow/install` | импорт workflow с `confirm:true` |
 | POST | `/api/doctor` | `doctor.sh`; тестовая заявка с `confirm:true` |
 
-Все POST требуют `X-Wizard-Token`. Ошибки имеют вид `{ok:false,error,message}`.
+Все POST требуют `X-Wizard-Token`. В server mode все API, кроме health/auth, дополнительно
+требуют действующую сессию администратора; снаружи пути имеют префикс `/setup/`.
+Ошибки имеют вид `{ok:false,error,message}`.
 
 ## Ограничения
 

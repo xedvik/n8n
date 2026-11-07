@@ -1,4 +1,4 @@
-# CRM Automation Kit v0.4
+# CRM Automation Kit v0.4.1
 
 Переиспользуемый lead-intake kit для n8n: HTTP webhook → нормализация → валидация → идемпотентная операция в PostgreSQL → CRM → опциональный журнал → опциональные уведомления → HTTP-ответ.
 
@@ -25,7 +25,7 @@
 
 Стек: `docker.n8n.io/n8nio/n8n:2.46.6`, `postgres:17.11-alpine`, Docker Compose.
 
-## Веб-мастер настройки (v0.4)
+## Веб-мастер настройки (v0.4.1)
 
 Для настройки клиента через браузер, без ручного редактирования конфига:
 
@@ -36,6 +36,19 @@
 Мастер откроется на `http://127.0.0.1:8787`. Он работает только локально, не передаёт `N8N_API_KEY` в браузер и сохраняет конфиг атомарно с backup. Для автоматического создания credentials нужен n8n API key: `http://127.0.0.1:5678/settings/api` (scopes: `workflow:read`, `workflow:update`, `workflow:activate`, `credential:list`, `credential:read`, `credential:create`).
 
 Подробнее: [docs/WIZARD.md](docs/WIZARD.md).
+
+## Серверное развёртывание (один домен, HTTPS)
+
+Для публичного сервера Caddy публикует n8n и мастер на одном домене: n8n — на `/`,
+мастер — на `/setup/`. n8n остаётся на loopback, PostgreSQL наружу не публикуется.
+
+```bash
+sudo ./scripts/install-server.sh crm.example.com admin@example.com
+```
+
+Установщик создаёт `.env`, генерирует секреты, ставит systemd-юнит мастера, поднимает
+Compose, применяет миграции и печатает первые шаги. Повторный запуск сохраняет данные
+и секреты. Подробности, DNS/TLS, backup и откат: [docs/SERVER.md](docs/SERVER.md).
 
 ## Быстрый старт
 
@@ -135,6 +148,7 @@ docker compose up -d
 ## Документация
 
 - [Веб-мастер настройки](docs/WIZARD.md)
+- [Серверное развёртывание (Caddy, HTTPS, один домен)](docs/SERVER.md)
 - [Пошаговая настройка с нуля](docs/SETUP.md)
 - [Google Sheets](docs/integrations/google-sheets.md)
 - [Telegram](docs/integrations/telegram.md)
@@ -145,12 +159,15 @@ docker compose up -d
 
 ```text
 workflows/lead-intake.json      # v0.3 workflow (94 nodes)
+Caddyfile                       # HTTPS reverse proxy для серверного режима
+docker-compose.server.yml       # overlay: Caddy + loopback-only n8n
 config/example-client.json      # v2-шаблон конфига
 config/example-legacy-google-sheets.json
 config/client.json              # локальный конфиг клиента, gitignored
 db/migrations/                  # PostgreSQL schema/functions
 scripts/setup-client.sh         # интерактивный onboarding
-scripts/start-wizard.sh         # локальный веб-мастер v0.4
+scripts/install-server.sh       # установка серверного режима (Caddy, systemd)
+scripts/start-wizard.sh         # локальный веб-мастер v0.4.1
 wizard/                         # backend + static UI мастера
 scripts/migrate.sh              # применение миграций
 scripts/doctor.sh               # диагностика + независимый API read-back

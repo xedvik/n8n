@@ -22,9 +22,19 @@ export function hostAllowed(hostHeader, port) {
     allowed.add('localhost');
     allowed.add('[::1]');
   }
+  const crmDomain = String(process.env.CRM_DOMAIN || '')
+    .trim()
+    .toLowerCase()
+    .replace(/^https?:\/\//, '')
+    .replace(/\/+$/, '');
+  if (crmDomain) {
+    allowed.add(crmDomain);
+    allowed.add(`${crmDomain}:443`);
+    allowed.add(`${crmDomain}:80`);
+  }
   const extra = String(process.env.WIZARD_ALLOWED_HOSTS || '')
     .split(',')
-    .map((item) => item.trim())
+    .map((item) => item.trim().toLowerCase())
     .filter(Boolean);
   for (const item of extra) allowed.add(item);
   return allowed.has(String(hostHeader).toLowerCase());

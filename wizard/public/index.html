@@ -6,8 +6,8 @@
     <meta name="wizard-token" content="">
     <meta name="color-scheme" content="light">
     <title>CRM Automation Kit — настройка</title>
-    <link rel="icon" href="/favicon.svg" type="image/svg+xml">
-    <link rel="stylesheet" href="/styles.css">
+    <link rel="icon" href="./favicon.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="./styles.css">
   </head>
   <body>
     <div class="shell">
@@ -19,7 +19,10 @@
             <h1>Настройка клиента</h1>
           </div>
         </div>
-        <div class="top-status" id="top-status" aria-live="polite"></div>
+        <div class="topbar-side">
+          <div class="top-status" id="top-status" aria-live="polite"></div>
+          <button type="button" id="logout-btn" class="btn btn-ghost btn-small hidden" data-action="logout">Выйти</button>
+        </div>
       </header>
 
       <div class="progress-wrap" aria-label="Общий прогресс настройки">
@@ -59,6 +62,6 @@
       </form>
     </dialog>
 
-    <script src="/app.js" defer></script>
+    <script src="./app.js" defer></script>
   </body>
 </html>
