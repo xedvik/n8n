@@ -87,8 +87,8 @@ https://api.telegram.org/bot<TOKEN>/getUpdates
 
 Если CRM сохранила заявку, но Telegram недоступен:
 
-- HTTP `201/200/202` с `notified:false`;
-- `status` содержит `_with_notification_error`;
+- HTTP `202 needs_reconciliation` с `notified:false`;
+- `status` равен `needs_reconciliation`; автоматической переотправки нет;
 - `warnings` содержит `notification_send_failed`;
 - execution имеет статус `error`, чтобы сбой был виден.
 

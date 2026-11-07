@@ -259,6 +259,21 @@ errors["googleSheets"] = error_sheets
 errors["enabled"] = bool_value("ERRORS_ENABLED")
 base["errors"] = errors
 
+idempotency = base.get("idempotency") or {}
+template_idempotency = template.get("idempotency") or {}
+idempotency.setdefault("enabled", template_idempotency.get("enabled", True))
+idempotency.setdefault("retentionDays", template_idempotency.get("retentionDays", 30))
+idempotency.setdefault("withoutKeyPolicy", "process_new")
+base["idempotency"] = idempotency
+
+retry = base.get("retry") or {}
+template_retry = template.get("retry") or {}
+retry.setdefault("maxAttempts", template_retry.get("maxAttempts", 5))
+retry.setdefault("baseDelaySeconds", template_retry.get("baseDelaySeconds", 30))
+retry.setdefault("maxDelaySeconds", template_retry.get("maxDelaySeconds", 3600))
+retry.setdefault("processingTimeoutSeconds", template_retry.get("processingTimeoutSeconds", 300))
+base["retry"] = retry
+
 Path(os.environ["OUTPUT_FILE"]).write_text(json.dumps(base, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 PY
 
@@ -281,6 +296,7 @@ fi
 if [ "$notifications_enabled" = "true" ]; then
   echo "- Telegram API: назначить ноде Notification Adapter - Telegram."
 fi
+echo "- PostgreSQL: назначить credential 'CRM Automation Kit DB' (или свой Postgres credential) нодам Reserve Operation и всем Save * State."
 echo
 if [[ "$CONFIG_FILE" = /* ]]; then
   echo "В .env укажите: LEAD_CONFIG_FILE=${CONFIG_FILE}"

@@ -9,6 +9,9 @@ until curl -fsS "${BASE_URL}/healthz/readiness" >/dev/null 2>&1; do
   sleep 2
 done
 
+# Apply app schema migrations before importing a workflow that depends on them.
+./scripts/migrate.sh >/dev/null
+
 existing_id="$(docker compose exec -T n8n n8n list:workflow --onlyId 2>/dev/null | tr -d '\r' | grep -Fx "${WORKFLOW_ID}" || true)"
 if [ -n "${existing_id}" ] && [ "${ALLOW_REIMPORT:-0}" != "1" ]; then
   echo "Workflow ${WORKFLOW_ID} already exists. Re-importing a credential-free export can clear" >&2

@@ -18,11 +18,26 @@
 | `404` | webhook не зарегистрирован | workflow не опубликован/не активен, n8n не перезапущен после CLI publish |
 | `400 validation_error` | заявка не прошла бизнес-валидацию | `details`: name и email/phone |
 | `500 configuration_error` | конфиг не прочитан/невалиден | `detail`, `./scripts/config-check.mjs`, `setup-client.sh` |
-| `502 crm_write_failed` | CRM не сохранил | credentials, scopes, spreadsheet/HubSpot ID, доступы, rate limit |
-| `429 crm_rate_limited` | HubSpot rate limit после retries | подождать, уменьшить частоту, проверить execution |
+| `502 crm_write_failed` | CRM окончательно не сохранил | credentials, scopes, spreadsheet/HubSpot ID, доступы, лимиты |
+| `503 state_store_failed` | не удалось записать состояние операции | PostgreSQL credential, `./scripts/migrate.sh`, доступ к `app.lead_operations`; успех не подтверждён |
+| `409 idempotency_conflict` | тот же ключ, другие данные | используйте новый `external_id`/`Idempotency-Key` или проверьте payload |
+| `202 retry_scheduled` | retry запланирован | смотрите `retryAt`, `app.lead_operations`, Schedule Trigger |
+| `202 in_progress` | такая же операция уже выполняется | не отправляйте повторно; дождитесь завершения |
+| `202 needs_reconciliation` | часть стадий подтверждена, есть неоднозначная | проверьте `crm`/`journal`/`notifications` и выполните ручную сверку |
 | `201 created` | CRM создал запись/контакт | нормально |
 | `200 updated` | HubSpot обновил существующий контакт | нормально |
+| `200 replayed:true` | повтор завершённой операции | нормально; внешние действия не повторялись |
 | `202 crm_skipped` | CRM пропущен по политике | phone-only skip или ambiguous match; journal/notifications могли выполниться |
+
+## Операции и recovery
+
+- Посмотреть состояние: `select id,status,crm_status,journal_status,telegram_status,attempts,next_attempt_at,last_error from app.lead_operations order by created_at desc limit 20;`
+- `retry_scheduled` с прошедшим `next_attempt_at`: проверьте Schedule Trigger executions и `Select Due Operations`.
+- `processing` дольше `processingTimeoutSeconds`: recovery заберёт операцию; pre-filter расписания проверяет `processing` старше 5 минут, поэтому при значении меньше 300 секунд восстановление может занять до 5 минут. Авторитетный гейт — `reserve_lead_operation`; не запускайте второй webhook вручную.
+- `needs_reconciliation`: автоматического retry нет. Проверьте внешний результат и решите, нужен ли ручной retry.
+- Ручной retry: `./scripts/retry-operation.sh <operation-id>`; `--reset-attempts` только после понимания причины.
+- Очистка: `./scripts/cleanup-operations.sh --dry-run`, затем без флага.
+- Не удаляйте операции со статусами `retry_scheduled`/`processing`/`needs_reconciliation` без разбора.
 
 ## Header Auth
 
@@ -91,7 +106,7 @@ http://localhost:5678/rest/oauth2-credential/callback
 - `403 bot is not a member`: добавьте бота в группу и дайте право писать.
 - `chatId` группы отрицательный (`-100...`).
 - Проверьте `parse_mode=HTML`: шаблон не должен содержать незакрытые теги.
-- При ошибке Telegram заявка уже сохранена: ответ `_with_notification_error`, `notified:false`, `warnings`, execution `error`.
+- При ошибке Telegram заявка уже сохранена: ответ `202 needs_reconciliation`, `notified:false`, `warnings`; автоматической переотправки нет. Решение о повторной отправке принимает оператор.
 - Если уведомления не нужны, `notifications.enabled=false`; credential не требуется.
 
 ## HubSpot: `crm=created`, но контакта нет
@@ -113,16 +128,17 @@ http://localhost:5678/rest/oauth2-credential/callback
 - `401/403`: неверный Service Key или нет scopes `crm.objects.contacts.read/write`.
 - Если используете OAuth2, переключите **Credential Type** на всех трёх HubSpot-нодах и назначьте OAuth2 credential; по умолчанию используется Service Key.
 - `400 Property ... does not exist`: создайте custom property или уберите его из `propertyMapping`.
-- `429`: rate limit; 3 retries уже настроены, затем ответ `429 crm_rate_limited`.
-- `502`: credential не назначен `HubSpot Search Contact` / `Create` / `Update`, неверный base URL или API error.
-- Phone-only `202 crm_skipped` — это нормальная политика `skip`, не ошибка. Поиск/создание по телефону в v0.2 не поддерживается: нужна отдельная проверенная стратегия нормализации телефона.
+- `429`: rate limit; операция получает `202 retry_scheduled` с `Retry-After`, если он был в HTTP-ответе, иначе exponential backoff. После `maxAttempts` — окончательная ошибка.
+- `502`: credential не назначен `HubSpot Search Contact` / `Create` / `Update`, неверный base URL или окончательная API error.
+- Phone-only `202 crm_skipped` — это нормальная политика `skip`, не ошибка. Поиск/создание по телефону в v0.3 не поддерживается: нужна отдельная проверенная стратегия нормализации телефона.
 - Несколько совпадений по email/phone → `ambiguous_match`, контакт не меняется.
 
 ## Частичные ошибки
 
-- CRM успешна, Journal упал → CRM-ответ сохраняется, `journal.status=failed`, warning, execution `error`.
-- CRM успешна, Telegram упал → `status=..._with_notification_error`, `notified=false`, warning, execution `error`.
-- CRM упала → `502/429`, journal и notifications не выполняются, ошибка видна в execution и (если включён) в Errors.
+- CRM успешна, Journal transient-ошибка → `202 retry_scheduled`; recovery повторяет только Journal, CRM не дублируется.
+- CRM успешна, Journal permanent-ошибка → `202 needs_reconciliation`, `journal.status=failed`; автоматического retry нет.
+- CRM успешна, Telegram упал → `202 needs_reconciliation`, `notified=false`; автоматической переотправки нет.
+- CRM упала окончательно → `502`; транзиентная ошибка → `202 retry_scheduled`. Journal и notifications не выполняются до успешного CRM-этапа; ошибка видна в execution и (если включён) в Errors.
 - `Stop and Error` после отправки ответа нужен, чтобы execution получил статус `error`; клиент уже получил корректный HTTP-ответ.
 
 ## PII и executions

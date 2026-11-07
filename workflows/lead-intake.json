@@ -55,7 +55,7 @@
     {
       "parameters": {
         "mode": "runOnceForAllItems",
-        "jsCode": "const raw = $input.first().json.config;\n\nif (!raw || typeof raw !== 'object' || Array.isArray(raw)) {\n  throw new Error('Client config must be a JSON object');\n}\n\nconst failures = [];\nconst isObject = (value) => Boolean(value) && typeof value === 'object' && !Array.isArray(value);\nconst isText = (value) => typeof value === 'string' && value.trim().length > 0;\nconst fail = (message) => failures.push(message);\nconst requireObject = (value, path) => {\n  if (!isObject(value)) {\n    fail(`${path} must be an object`);\n    return {};\n  }\n  return value;\n};\nconst requireText = (object, key, path) => {\n  if (!isText(object[key])) fail(`${path} must be a non-empty string`);\n};\nconst requireSheets = (value, path) => {\n  const sheets = requireObject(value, path);\n  requireText(sheets, 'spreadsheetId', `${path}.spreadsheetId`);\n  requireText(sheets, 'sheetName', `${path}.sheetName`);\n  const columns = requireObject(sheets.columns, `${path}.columns`);\n  if (!isText(columns.name)) fail(`${path}.columns.name must be a non-empty string`);\n  if (!isText(columns.email) && !isText(columns.phone)) {\n    fail(`${path}.columns must include email or phone`);\n  }\n  return sheets;\n};\n\nconst legacy = !raw.version || Number(raw.version) < 2;\nlet config;\n\nif (legacy) {\n  const oldSheets = requireObject(raw.googleSheets, 'googleSheets');\n  config = {\n    version: 2,\n    clientName: raw.clientName || 'Client',\n    timezone: raw.timezone || 'UTC',\n    source: {\n      type: 'webhook',\n      defaultSource: (raw.defaults && raw.defaults.source) || 'unknown',\n      allowedSources: [],\n    },\n    mapping: raw.mapping,\n    crm: {\n      provider: 'google_sheets',\n      googleSheets: {\n        spreadsheetId: oldSheets.spreadsheetId,\n        leadsSheetName: oldSheets.leadsSheetName,\n        columns: oldSheets.columns,\n      },\n    },\n    journal: { enabled: false },\n    notifications: {\n      enabled: true,\n      channels: ['telegram'],\n      telegram: raw.telegram,\n    },\n    errors: {\n      enabled: true,\n      provider: 'google_sheets',\n      googleSheets: {\n        spreadsheetId: oldSheets.spreadsheetId,\n        sheetName: oldSheets.errorsSheetName,\n        columns: oldSheets.errorColumns,\n      },\n    },\n  };\n} else {\n  config = JSON.parse(JSON.stringify(raw));\n}\n\nconfig.clientName = config.clientName || 'Client';\nconfig.timezone = config.timezone || 'UTC';\nif (!isText(config.timezone)) {\n  fail('timezone must be a non-empty IANA timezone string');\n} else {\n  try {\n    new Intl.DateTimeFormat('en-US', { timeZone: config.timezone }).format(new Date());\n  } catch (error) {\n    fail('timezone must be a valid IANA timezone');\n  }\n}\nconst source = requireObject(config.source, 'source');\nif (source.type !== 'webhook') fail('source.type must be \"webhook\"');\nif (!isText(source.defaultSource)) fail('source.defaultSource must be a non-empty string');\nif (source.allowedSources !== undefined && !Array.isArray(source.allowedSources)) {\n  fail('source.allowedSources must be an array');\n}\nif (Array.isArray(source.allowedSources)) {\n  for (const item of source.allowedSources) {\n    if (!isText(item)) fail('source.allowedSources must contain only non-empty strings');\n  }\n}\n\nconst mapping = requireObject(config.mapping, 'mapping');\nfor (const field of ['name', 'email', 'phone', 'source', 'message', 'externalId']) {\n  requireText(mapping, field, `mapping.${field}`);\n}\n\nconst crm = requireObject(config.crm, 'crm');\nif (!['hubspot', 'google_sheets', 'none'].includes(crm.provider)) {\n  fail('crm.provider must be one of: hubspot, google_sheets, none');\n}\n\nconst leadFields = new Set(['name', 'firstName', 'lastName', 'email', 'phone', 'source', 'message', 'externalId']);\n\nif (crm.provider === 'hubspot') {\n  const hubspot = requireObject(crm.hubspot, 'crm.hubspot');\n  if (!isText(hubspot.baseUrl)) {\n    fail('crm.hubspot.baseUrl must be a non-empty string');\n  } else if (!/^https?:\\/\\/[^\\s/]+/i.test(hubspot.baseUrl)) {\n    fail('crm.hubspot.baseUrl must be a valid http(s) URL');\n  }\n  if ((hubspot.phoneOnlyPolicy || 'skip') !== 'skip') {\n    fail('crm.hubspot.phoneOnlyPolicy currently supports only \"skip\"');\n  }\n  if (hubspot.searchEmailProperty !== undefined && !isText(hubspot.searchEmailProperty)) {\n    fail('crm.hubspot.searchEmailProperty must be a non-empty string');\n  }\n  const searchLimit = Number(hubspot.searchLimit || 10);\n  if (!Number.isInteger(searchLimit) || searchLimit < 1 || searchLimit > 100) {\n    fail('crm.hubspot.searchLimit must be an integer between 1 and 100');\n  }\n  if (hubspot.propertiesToReturn !== undefined) {\n    if (!Array.isArray(hubspot.propertiesToReturn) || hubspot.propertiesToReturn.some((item) => !isText(item))) {\n      fail('crm.hubspot.propertiesToReturn must be an array of non-empty strings');\n    }\n  }\n  const propertyMapping = requireObject(hubspot.propertyMapping, 'crm.hubspot.propertyMapping');\n  const entries = Object.entries(propertyMapping);\n  if (entries.length === 0) fail('crm.hubspot.propertyMapping must contain at least one property');\n  for (const [destination, sourceField] of entries) {\n    if (!isText(destination)) fail('crm.hubspot.propertyMapping contains an empty destination property');\n    if (!isText(sourceField) || !leadFields.has(sourceField)) {\n      fail(`crm.hubspot.propertyMapping.${destination} must reference a valid Lead field`);\n    }\n  }\n  if (!isText(propertyMapping.email)) {\n    fail('crm.hubspot.propertyMapping.email is required for contact deduplication');\n  }\n}\n\nif (crm.provider === 'google_sheets') {\n  const sheets = requireObject(crm.googleSheets, 'crm.googleSheets');\n  requireText(sheets, 'spreadsheetId', 'crm.googleSheets.spreadsheetId');\n  requireText(sheets, 'leadsSheetName', 'crm.googleSheets.leadsSheetName');\n  const columns = requireObject(sheets.columns, 'crm.googleSheets.columns');\n  if (!isText(columns.name)) fail('crm.googleSheets.columns.name must be a non-empty string');\n  if (!isText(columns.email) && !isText(columns.phone)) {\n    fail('crm.googleSheets.columns must include email or phone');\n  }\n}\n\nconst journal = config.journal === undefined ? { enabled: false } : requireObject(config.journal, 'journal');\njournal.enabled = Boolean(journal.enabled);\nif (journal.enabled) {\n  if (journal.provider !== 'google_sheets') fail('journal.provider must be \"google_sheets\"');\n  const journalSheets = requireSheets(journal.googleSheets, 'journal.googleSheets');\n  if (crm.provider === 'google_sheets') {\n    const crmSheets = crm.googleSheets || {};\n    if (crmSheets.spreadsheetId === journalSheets.spreadsheetId && crmSheets.leadsSheetName === journalSheets.sheetName) {\n      fail('journal must target a different sheet than crm.googleSheets when CRM is Google Sheets');\n    }\n  }\n}\n\nconst notifications = config.notifications === undefined ? { enabled: false } : requireObject(config.notifications, 'notifications');\nnotifications.enabled = Boolean(notifications.enabled);\nif (notifications.enabled) {\n  if (!Array.isArray(notifications.channels) || notifications.channels.length === 0) {\n    fail('notifications.channels must contain at least one channel when notifications are enabled');\n  }\n  for (const channel of notifications.channels || []) {\n    if (channel !== 'telegram') fail(`unsupported notification channel: ${channel}`);\n  }\n  if ((notifications.channels || []).includes('telegram')) {\n    const telegram = requireObject(notifications.telegram, 'notifications.telegram');\n    requireText(telegram, 'chatId', 'notifications.telegram.chatId');\n    if (!isText(telegram.messageTemplate)) {\n      fail('notifications.telegram.messageTemplate must be a non-empty string');\n    } else {\n      const allowed = new Set(['name', 'firstName', 'lastName', 'email', 'phone', 'source', 'message', 'externalId', 'requestId', 'createdAt', 'crmStatus', 'crmProvider', 'crmContactId']);\n      const placeholders = [...telegram.messageTemplate.matchAll(/\\{\\{\\s*(\\w+)\\s*\\}\\}/g)].map((match) => match[1]);\n      for (const placeholder of placeholders) {\n        if (!allowed.has(placeholder)) fail(`notifications.telegram.messageTemplate contains unknown placeholder {{${placeholder}}}`);\n      }\n    }\n  }\n}\n\nconst errors = config.errors === undefined ? { enabled: false } : requireObject(config.errors, 'errors');\nerrors.enabled = Boolean(errors.enabled);\nif (errors.enabled) {\n  if (errors.provider !== 'google_sheets') fail('errors.provider must be \"google_sheets\"');\n  const errorSheets = requireObject(errors.googleSheets, 'errors.googleSheets');\n  requireText(errorSheets, 'spreadsheetId', 'errors.googleSheets.spreadsheetId');\n  requireText(errorSheets, 'sheetName', 'errors.googleSheets.sheetName');\n  const errorColumns = requireObject(errorSheets.columns, 'errors.googleSheets.columns');\n  for (const field of ['createdAt', 'requestId', 'stage', 'error']) {\n    if (!isText(errorColumns[field])) fail(`errors.googleSheets.columns.${field} must be a non-empty string`);\n  }\n}\n\nif (crm.provider === 'none' && !journal.enabled) {\n  fail('at least one persistence target is required: crm.provider or journal.enabled');\n}\n\nconfig.version = 2;\nconfig.source = source;\nconfig.source.allowedSources = Array.isArray(source.allowedSources) ? source.allowedSources : [];\nconfig.crm = crm;\nconfig.journal = journal;\nconfig.notifications = notifications;\nconfig.errors = errors;\n\nif (config.crm.provider === 'hubspot') {\n  const hubspot = config.crm.hubspot;\n  hubspot.baseUrl = hubspot.baseUrl.replace(/\\/+$/, '');\n  hubspot.phoneOnlyPolicy = 'skip';\n  hubspot.searchEmailProperty = hubspot.searchEmailProperty || 'email';\n  delete hubspot.searchPhoneProperty;\n  hubspot.searchLimit = Number(hubspot.searchLimit || 10);\n  hubspot.propertiesToReturn = Array.isArray(hubspot.propertiesToReturn)\n    ? hubspot.propertiesToReturn\n    : ['email', 'phone', 'firstname', 'lastname'];\n}\n\nif (failures.length > 0) {\n  throw new Error(`Invalid client config: ${failures.join('; ')}`);\n}\n\nreturn [{ json: { config } }];"
+        "jsCode": "const raw = $input.first().json.config;\n\nif (!raw || typeof raw !== 'object' || Array.isArray(raw)) {\n  throw new Error('Client config must be a JSON object');\n}\n\nconst failures = [];\nconst isObject = (value) => Boolean(value) && typeof value === 'object' && !Array.isArray(value);\nconst isText = (value) => typeof value === 'string' && value.trim().length > 0;\nconst fail = (message) => failures.push(message);\nconst requireObject = (value, path) => {\n  if (!isObject(value)) {\n    fail(`${path} must be an object`);\n    return {};\n  }\n  return value;\n};\nconst requireText = (object, key, path) => {\n  if (!isText(object[key])) fail(`${path} must be a non-empty string`);\n};\nconst requireSheets = (value, path) => {\n  const sheets = requireObject(value, path);\n  requireText(sheets, 'spreadsheetId', `${path}.spreadsheetId`);\n  requireText(sheets, 'sheetName', `${path}.sheetName`);\n  const columns = requireObject(sheets.columns, `${path}.columns`);\n  if (!isText(columns.name)) fail(`${path}.columns.name must be a non-empty string`);\n  if (!isText(columns.email) && !isText(columns.phone)) {\n    fail(`${path}.columns must include email or phone`);\n  }\n  return sheets;\n};\n\nconst legacy = !raw.version || Number(raw.version) < 2;\nlet config;\n\nif (legacy) {\n  const oldSheets = requireObject(raw.googleSheets, 'googleSheets');\n  config = {\n    version: 2,\n    clientName: raw.clientName || 'Client',\n    timezone: raw.timezone || 'UTC',\n    source: {\n      type: 'webhook',\n      defaultSource: (raw.defaults && raw.defaults.source) || 'unknown',\n      allowedSources: [],\n    },\n    mapping: raw.mapping,\n    crm: {\n      provider: 'google_sheets',\n      googleSheets: {\n        spreadsheetId: oldSheets.spreadsheetId,\n        leadsSheetName: oldSheets.leadsSheetName,\n        columns: oldSheets.columns,\n      },\n    },\n    journal: { enabled: false },\n    notifications: {\n      enabled: true,\n      channels: ['telegram'],\n      telegram: raw.telegram,\n    },\n    errors: {\n      enabled: true,\n      provider: 'google_sheets',\n      googleSheets: {\n        spreadsheetId: oldSheets.spreadsheetId,\n        sheetName: oldSheets.errorsSheetName,\n        columns: oldSheets.errorColumns,\n      },\n    },\n  };\n} else {\n  config = JSON.parse(JSON.stringify(raw));\n}\n\nconfig.clientName = config.clientName || 'Client';\nconfig.timezone = config.timezone || 'UTC';\nif (!isText(config.timezone)) {\n  fail('timezone must be a non-empty IANA timezone string');\n} else {\n  try {\n    new Intl.DateTimeFormat('en-US', { timeZone: config.timezone }).format(new Date());\n  } catch (error) {\n    fail('timezone must be a valid IANA timezone');\n  }\n}\nconst source = requireObject(config.source, 'source');\nif (source.type !== 'webhook') fail('source.type must be \"webhook\"');\nif (!isText(source.defaultSource)) fail('source.defaultSource must be a non-empty string');\nif (source.allowedSources !== undefined && !Array.isArray(source.allowedSources)) {\n  fail('source.allowedSources must be an array');\n}\nif (Array.isArray(source.allowedSources)) {\n  for (const item of source.allowedSources) {\n    if (!isText(item)) fail('source.allowedSources must contain only non-empty strings');\n  }\n}\n\nconst mapping = requireObject(config.mapping, 'mapping');\nfor (const field of ['name', 'email', 'phone', 'source', 'message', 'externalId']) {\n  requireText(mapping, field, `mapping.${field}`);\n}\n\nconst crm = requireObject(config.crm, 'crm');\nif (!['hubspot', 'google_sheets', 'none'].includes(crm.provider)) {\n  fail('crm.provider must be one of: hubspot, google_sheets, none');\n}\n\nconst leadFields = new Set(['name', 'firstName', 'lastName', 'email', 'phone', 'source', 'message', 'externalId']);\n\nif (crm.provider === 'hubspot') {\n  const hubspot = requireObject(crm.hubspot, 'crm.hubspot');\n  if (!isText(hubspot.baseUrl)) {\n    fail('crm.hubspot.baseUrl must be a non-empty string');\n  } else if (!/^https?:\\/\\/[^\\s/]+/i.test(hubspot.baseUrl)) {\n    fail('crm.hubspot.baseUrl must be a valid http(s) URL');\n  }\n  if ((hubspot.phoneOnlyPolicy || 'skip') !== 'skip') {\n    fail('crm.hubspot.phoneOnlyPolicy currently supports only \"skip\"');\n  }\n  if (hubspot.searchEmailProperty !== undefined && !isText(hubspot.searchEmailProperty)) {\n    fail('crm.hubspot.searchEmailProperty must be a non-empty string');\n  }\n  const searchLimit = Number(hubspot.searchLimit || 10);\n  if (!Number.isInteger(searchLimit) || searchLimit < 1 || searchLimit > 100) {\n    fail('crm.hubspot.searchLimit must be an integer between 1 and 100');\n  }\n  if (hubspot.propertiesToReturn !== undefined) {\n    if (!Array.isArray(hubspot.propertiesToReturn) || hubspot.propertiesToReturn.some((item) => !isText(item))) {\n      fail('crm.hubspot.propertiesToReturn must be an array of non-empty strings');\n    }\n  }\n  const propertyMapping = requireObject(hubspot.propertyMapping, 'crm.hubspot.propertyMapping');\n  const entries = Object.entries(propertyMapping);\n  if (entries.length === 0) fail('crm.hubspot.propertyMapping must contain at least one property');\n  for (const [destination, sourceField] of entries) {\n    if (!isText(destination)) fail('crm.hubspot.propertyMapping contains an empty destination property');\n    if (!isText(sourceField) || !leadFields.has(sourceField)) {\n      fail(`crm.hubspot.propertyMapping.${destination} must reference a valid Lead field`);\n    }\n  }\n  if (!isText(propertyMapping.email)) {\n    fail('crm.hubspot.propertyMapping.email is required for contact deduplication');\n  }\n}\n\nif (crm.provider === 'google_sheets') {\n  const sheets = requireObject(crm.googleSheets, 'crm.googleSheets');\n  requireText(sheets, 'spreadsheetId', 'crm.googleSheets.spreadsheetId');\n  requireText(sheets, 'leadsSheetName', 'crm.googleSheets.leadsSheetName');\n  const columns = requireObject(sheets.columns, 'crm.googleSheets.columns');\n  if (!isText(columns.name)) fail('crm.googleSheets.columns.name must be a non-empty string');\n  if (!isText(columns.email) && !isText(columns.phone)) {\n    fail('crm.googleSheets.columns must include email or phone');\n  }\n}\n\nconst journal = config.journal === undefined ? { enabled: false } : requireObject(config.journal, 'journal');\njournal.enabled = Boolean(journal.enabled);\nif (journal.enabled) {\n  if (journal.provider !== 'google_sheets') fail('journal.provider must be \"google_sheets\"');\n  const journalSheets = requireSheets(journal.googleSheets, 'journal.googleSheets');\n  if (crm.provider === 'google_sheets') {\n    const crmSheets = crm.googleSheets || {};\n    if (crmSheets.spreadsheetId === journalSheets.spreadsheetId && crmSheets.leadsSheetName === journalSheets.sheetName) {\n      fail('journal must target a different sheet than crm.googleSheets when CRM is Google Sheets');\n    }\n  }\n}\n\nconst notifications = config.notifications === undefined ? { enabled: false } : requireObject(config.notifications, 'notifications');\nnotifications.enabled = Boolean(notifications.enabled);\nif (notifications.enabled) {\n  if (!Array.isArray(notifications.channels) || notifications.channels.length === 0) {\n    fail('notifications.channels must contain at least one channel when notifications are enabled');\n  }\n  for (const channel of notifications.channels || []) {\n    if (channel !== 'telegram') fail(`unsupported notification channel: ${channel}`);\n  }\n  if ((notifications.channels || []).includes('telegram')) {\n    const telegram = requireObject(notifications.telegram, 'notifications.telegram');\n    requireText(telegram, 'chatId', 'notifications.telegram.chatId');\n    if (!isText(telegram.messageTemplate)) {\n      fail('notifications.telegram.messageTemplate must be a non-empty string');\n    } else {\n      const allowed = new Set(['name', 'firstName', 'lastName', 'email', 'phone', 'source', 'message', 'externalId', 'requestId', 'createdAt', 'crmStatus', 'crmProvider', 'crmContactId']);\n      const placeholders = [...telegram.messageTemplate.matchAll(/\\{\\{\\s*(\\w+)\\s*\\}\\}/g)].map((match) => match[1]);\n      for (const placeholder of placeholders) {\n        if (!allowed.has(placeholder)) fail(`notifications.telegram.messageTemplate contains unknown placeholder {{${placeholder}}}`);\n      }\n    }\n  }\n}\n\nconst errors = config.errors === undefined ? { enabled: false } : requireObject(config.errors, 'errors');\nerrors.enabled = Boolean(errors.enabled);\nif (errors.enabled) {\n  if (errors.provider !== 'google_sheets') fail('errors.provider must be \"google_sheets\"');\n  const errorSheets = requireObject(errors.googleSheets, 'errors.googleSheets');\n  requireText(errorSheets, 'spreadsheetId', 'errors.googleSheets.spreadsheetId');\n  requireText(errorSheets, 'sheetName', 'errors.googleSheets.sheetName');\n  const errorColumns = requireObject(errorSheets.columns, 'errors.googleSheets.columns');\n  for (const field of ['createdAt', 'requestId', 'stage', 'error']) {\n    if (!isText(errorColumns[field])) fail(`errors.googleSheets.columns.${field} must be a non-empty string`);\n  }\n}\n\nif (crm.provider === 'none' && !journal.enabled) {\n  fail('at least one persistence target is required: crm.provider or journal.enabled');\n}\n\nconst idempotency = config.idempotency === undefined ? {} : requireObject(config.idempotency, 'idempotency');\nif (idempotency.enabled !== undefined && typeof idempotency.enabled !== 'boolean') {\n  fail('idempotency.enabled must be a boolean');\n}\nconst retentionDays = Number(idempotency.retentionDays === undefined ? 30 : idempotency.retentionDays);\nif (!Number.isInteger(retentionDays) || retentionDays < 1 || retentionDays > 3650) {\n  fail('idempotency.retentionDays must be an integer between 1 and 3650');\n}\nif (idempotency.withoutKeyPolicy !== undefined && idempotency.withoutKeyPolicy !== 'process_new') {\n  fail('idempotency.withoutKeyPolicy currently supports only \"process_new\"');\n}\nconst retry = config.retry === undefined ? {} : requireObject(config.retry, 'retry');\nconst maxAttempts = Number(retry.maxAttempts === undefined ? 5 : retry.maxAttempts);\nif (!Number.isInteger(maxAttempts) || maxAttempts < 1 || maxAttempts > 20) {\n  fail('retry.maxAttempts must be an integer between 1 and 20');\n}\nconst baseDelaySeconds = Number(retry.baseDelaySeconds === undefined ? 30 : retry.baseDelaySeconds);\nif (!Number.isInteger(baseDelaySeconds) || baseDelaySeconds < 1 || baseDelaySeconds > 3600) {\n  fail('retry.baseDelaySeconds must be an integer between 1 and 3600');\n}\nconst maxDelaySeconds = Number(retry.maxDelaySeconds === undefined ? 3600 : retry.maxDelaySeconds);\nif (!Number.isInteger(maxDelaySeconds) || maxDelaySeconds < baseDelaySeconds || maxDelaySeconds > 86400) {\n  fail('retry.maxDelaySeconds must be an integer >= baseDelaySeconds and <= 86400');\n}\nconst processingTimeoutSeconds = Number(retry.processingTimeoutSeconds === undefined ? 300 : retry.processingTimeoutSeconds);\nif (!Number.isInteger(processingTimeoutSeconds) || processingTimeoutSeconds < 30 || processingTimeoutSeconds > 86400) {\n  fail('retry.processingTimeoutSeconds must be an integer between 30 and 86400');\n}\n\nconfig.version = 2;\nconfig.source = source;\nconfig.source.allowedSources = Array.isArray(source.allowedSources) ? source.allowedSources : [];\nconfig.crm = crm;\nconfig.journal = journal;\nconfig.notifications = notifications;\nconfig.errors = errors;\nconfig.idempotency = {\n  enabled: idempotency.enabled !== false,\n  retentionDays,\n  withoutKeyPolicy: 'process_new',\n};\nconfig.retry = {\n  maxAttempts,\n  baseDelaySeconds,\n  maxDelaySeconds,\n  processingTimeoutSeconds,\n};\n\nif (config.crm.provider === 'hubspot') {\n  const hubspot = config.crm.hubspot;\n  hubspot.baseUrl = hubspot.baseUrl.replace(/\\/+$/, '');\n  hubspot.phoneOnlyPolicy = 'skip';\n  hubspot.searchEmailProperty = hubspot.searchEmailProperty || 'email';\n  delete hubspot.searchPhoneProperty;\n  hubspot.searchLimit = Number(hubspot.searchLimit || 10);\n  hubspot.propertiesToReturn = Array.isArray(hubspot.propertiesToReturn)\n    ? hubspot.propertiesToReturn\n    : ['email', 'phone', 'firstname', 'lastname'];\n}\n\nif (failures.length > 0) {\n  throw new Error(`Invalid client config: ${failures.join('; ')}`);\n}\n\nreturn [{ json: { config } }];"
       },
       "id": "dfc0ea53-2f20-48a7-a244-44070ac6bda0",
       "name": "Validate Client Config",
@@ -254,7 +254,7 @@
     {
       "parameters": {
         "mode": "runOnceForAllItems",
-        "jsCode": "const validated = $('Validate Lead').first().json;\nconst config = $('Validate Client Config').first().json.config;\nconst columns = config.crm.googleSheets.columns;\nconst values = {\n  createdAt: validated.meta.displayReceivedAt || validated.meta.receivedAt,\n  externalId: validated.lead.externalId,\n  name: validated.lead.name,\n  firstName: validated.lead.firstName,\n  lastName: validated.lead.lastName,\n  email: validated.lead.email,\n  phone: validated.lead.phone,\n  source: validated.lead.source,\n  message: validated.lead.message,\n  requestId: validated.meta.requestId,\n};\nconst row = {};\nfor (const [key, header] of Object.entries(columns)) {\n  if (typeof header !== 'string' || header.length === 0) continue;\n  row[header] = values[key] === null || values[key] === undefined ? '' : values[key];\n}\nif (Object.keys(row).length === 0) throw new Error('No Google Sheets CRM columns are configured');\nreturn [{ json: row }];"
+        "jsCode": "const validated = $('Validate Lead').first().json;\nconst config = $('Validate Client Config').first().json.config;\nconst columns = config.crm.googleSheets.columns;\nconst operation = $('Decide Operation').first().json.operation;\nconst values = {\n  createdAt: validated.meta.displayReceivedAt || validated.meta.receivedAt,\n  externalId: validated.lead.externalId,\n  name: validated.lead.name,\n  firstName: validated.lead.firstName,\n  lastName: validated.lead.lastName,\n  email: validated.lead.email,\n  phone: validated.lead.phone,\n  source: validated.lead.source,\n  message: validated.lead.message,\n  requestId: operation ? operation.id : validated.meta.requestId,\n};\nconst row = {};\nfor (const [key, header] of Object.entries(columns)) {\n  if (typeof header !== 'string' || header.length === 0) continue;\n  row[header] = values[key] === null || values[key] === undefined ? '' : values[key];\n}\nif (Object.keys(row).length === 0) throw new Error('No Google Sheets CRM columns are configured');\nreturn [{ json: row }];"
       },
       "id": "ea9ffc54-3c33-4310-8dae-73cfa0527163",
       "name": "Map CRM Sheet Row",
@@ -377,7 +377,14 @@
         "sendBody": true,
         "specifyBody": "json",
         "jsonBody": "={{ $json.requestBody }}",
-        "options": {}
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          }
+        }
       },
       "id": "eca2242f-cf71-4a8b-9919-795d4823652f",
       "name": "HubSpot Search Contact",
@@ -483,7 +490,14 @@
         "sendBody": true,
         "specifyBody": "json",
         "jsonBody": "={{ $json.requestBody }}",
-        "options": {}
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          }
+        }
       },
       "id": "3deccf23-2f2b-4d90-9119-e992043b075c",
       "name": "HubSpot Create Contact",
@@ -507,7 +521,14 @@
         "sendBody": true,
         "specifyBody": "json",
         "jsonBody": "={{ $json.requestBody }}",
-        "options": {}
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          }
+        }
       },
       "id": "9fa2fcfc-9eb3-4139-be97-c60ff985e03c",
       "name": "HubSpot Update Contact",
@@ -553,7 +574,7 @@
     {
       "parameters": {
         "mode": "runOnceForAllItems",
-        "jsCode": "const input = $input.first().json;\nconst config = $('Validate Client Config').first().json.config;\nconst validated = $('Validate Lead').first().json;\nconst rawError = input.error;\nconst detail = typeof rawError === 'string'\n  ? rawError\n  : (rawError && (rawError.message || rawError.description)) || input.message || 'CRM request failed';\nconst rateLimited = /(^|\\D)429(\\D|$)|rate limit|too many requests|spacing your requests|batching settings/i.test(String(detail));\nconst provider = config.crm.provider;\nconst crm = {\n  provider,\n  status: 'failed',\n  contactId: null,\n  matchedBy: null,\n  matchCount: 0,\n  reason: rateLimited ? 'rate_limited' : 'api_error',\n  httpStatus: rateLimited ? 429 : 502,\n  error: String(detail).slice(0, 2000),\n};\nconst response = {\n  ok: false,\n  error: rateLimited ? 'crm_rate_limited' : 'crm_write_failed',\n  message: rateLimited ? 'CRM rate limit reached. Retry later.' : 'Lead was not saved to the CRM.',\n  saved: false,\n  notified: false,\n  requestId: validated.meta.requestId,\n  externalId: validated.lead.externalId,\n  crm: { provider, status: 'failed', reason: crm.reason },\n};\nreturn [{\n  json: {\n    lead: validated.lead,\n    meta: validated.meta,\n    config,\n    crm,\n    response,\n    httpStatus: crm.httpStatus,\n    hasWarning: false,\n  },\n}];"
+        "jsCode": "const input = $input.first().json;\nconst config = $('Validate Client Config').first().json.config;\nconst validated = $('Validate Lead').first().json;\nconst operation = $('Decide Operation').first().json.operation;\nconst rawError = input.error;\nconst detail = typeof rawError === 'string'\n  ? rawError\n  : (rawError && (rawError.message || rawError.description)) || input.message || 'CRM request failed';\nconst retryConfig = config.retry || {};\nconst attempts = Number(operation.attempts || 1);\nconst maxAttempts = Math.max(1, Number(retryConfig.maxAttempts || 5));\nconst retryable = /(^|\\D)429(\\D|$)|rate limit|too many requests|spacing your requests|batching settings|timeout|timed out|ECONN|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|network|refused|offline|socket hang up|connection reset|connection refused|ENETUNREACH|EHOSTUNREACH|5\\d\\d/i.test(String(detail)) && attempts < maxAttempts;\nconst rateLimited = /(^|\\D)429(\\D|$)|rate limit|too many requests|spacing your requests|batching settings/i.test(String(detail));\nconst baseDelay = Math.max(1, Number(retryConfig.baseDelaySeconds || 30));\nconst maxDelay = Math.max(baseDelay, Number(retryConfig.maxDelaySeconds || 3600));\nconst retryAfterMatch = String(detail).match(/Retry-After:\\s*([0-9]+)/i);\nconst retryAfterSeconds = retryAfterMatch ? Math.max(1, Number(retryAfterMatch[1])) : null;\nconst delaySeconds = retryAfterSeconds !== null ? Math.min(maxDelay, retryAfterSeconds) : Math.min(maxDelay, baseDelay * Math.pow(2, Math.max(0, attempts - 1)));\nconst jitterSeconds = retryAfterSeconds !== null ? 0 : Math.floor(delaySeconds * 0.2 * Math.random());\nconst retryAt = retryable ? new Date(Date.now() + (delaySeconds + jitterSeconds) * 1000).toISOString() : null;\nconst crm = {\n  provider: config.crm.provider,\n  status: 'failed',\n  contactId: null,\n  matchedBy: null,\n  matchCount: 0,\n  reason: rateLimited ? 'rate_limited' : 'api_error',\n  httpStatus: retryable ? 202 : 502,\n  error: String(detail).slice(0, 2000),\n};\nconst response = retryable\n  ? {\n      ok: false,\n      error: rateLimited ? 'crm_rate_limited' : 'crm_retry_scheduled',\n      message: 'CRM request failed; retry has been scheduled.',\n      saved: false,\n      notified: false,\n      operationId: operation.id,\n      status: 'retry_scheduled',\n      retryAt,\n    }\n  : {\n      ok: false,\n      error: rateLimited ? 'crm_rate_limited' : 'crm_write_failed',\n      message: rateLimited ? 'CRM rate limit reached.' : 'Lead was not saved to the CRM.',\n      saved: false,\n      notified: false,\n      operationId: operation.id,\n      status: 'failed',\n    };\nconst stateUpdate = {\n  status: retryable ? 'retry_scheduled' : 'failed',\n  crm_provider: config.crm.provider,\n  crm_status: 'failed',\n  crm_contact_id: null,\n  crm_error: String(detail).slice(0, 2000),\n  last_error: String(detail).slice(0, 2000),\n  next_attempt_at: retryAt,\n  response,\n};\nreturn [{\n  json: {\n    lead: validated.lead,\n    meta: validated.meta,\n    config,\n    operation,\n    crm,\n    response,\n    httpStatus: crm.httpStatus,\n    hasWarning: false,\n    stateUpdate,\n  },\n}];"
       },
       "id": "fa49e24b-e677-4694-8434-39838e061bf6",
       "name": "Build CRM Failure",
@@ -742,7 +763,7 @@
     {
       "parameters": {
         "mode": "runOnceForAllItems",
-        "jsCode": "const context = $input.first().json;\nconst config = context.config;\nconst columns = config.journal.googleSheets.columns;\nconst values = {\n  createdAt: context.meta.displayReceivedAt || context.meta.receivedAt,\n  externalId: context.lead.externalId,\n  name: context.lead.name,\n  firstName: context.lead.firstName,\n  lastName: context.lead.lastName,\n  email: context.lead.email,\n  phone: context.lead.phone,\n  source: context.lead.source,\n  message: context.lead.message,\n  requestId: context.meta.requestId,\n  crmProvider: context.crm.provider,\n  crmStatus: context.crm.status,\n  crmContactId: context.crm.contactId,\n};\nconst row = {};\nfor (const [key, header] of Object.entries(columns)) {\n  if (typeof header !== 'string' || header.length === 0) continue;\n  row[header] = values[key] === null || values[key] === undefined ? '' : values[key];\n}\nif (Object.keys(row).length === 0) throw new Error('No Google Sheets journal columns are configured');\nreturn [{ json: row }];"
+        "jsCode": "const context = $input.first().json;\nconst config = context.config;\nconst columns = config.journal.googleSheets.columns;\nconst values = {\n  createdAt: context.meta.displayReceivedAt || context.meta.receivedAt,\n  externalId: context.lead.externalId,\n  name: context.lead.name,\n  firstName: context.lead.firstName,\n  lastName: context.lead.lastName,\n  email: context.lead.email,\n  phone: context.lead.phone,\n  source: context.lead.source,\n  message: context.lead.message,\n  requestId: context.operation ? context.operation.id : context.meta.requestId,\n  crmProvider: context.crm.provider,\n  crmStatus: context.crm.status,\n  crmContactId: context.crm.contactId,\n};\nconst row = {};\nfor (const [key, header] of Object.entries(columns)) {\n  if (typeof header !== 'string' || header.length === 0) continue;\n  row[header] = values[key] === null || values[key] === undefined ? '' : values[key];\n}\nif (Object.keys(row).length === 0) throw new Error('No Google Sheets journal columns are configured');\nreturn [{ json: row }];"
       },
       "id": "5b32e561-dac9-42ff-94be-8a0d51fce984",
       "name": "Map Journal Row",
@@ -796,7 +817,7 @@
     {
       "parameters": {
         "mode": "runOnceForAllItems",
-        "jsCode": "const context = $('Build Journal Context').first().json;\nreturn [{\n  json: {\n    ...context,\n    journal: { enabled: true, status: 'saved' },\n    hasWarning: Boolean(context.hasWarning),\n  },\n}];"
+        "jsCode": "const context = $('Build Journal Context').first().json;\nconst stateUpdate = { status: 'processing', journal_status: 'saved', journal_error: null };\nreturn [{ json: { ...context, journal: { enabled: true, status: 'saved' }, stateUpdate, hasWarning: Boolean(context.hasWarning) } }];"
       },
       "id": "2b6a8373-8e8e-4f7d-be59-452b9cc1ba6a",
       "name": "Build Journal Saved",
@@ -810,7 +831,7 @@
     {
       "parameters": {
         "mode": "runOnceForAllItems",
-        "jsCode": "const context = $('Build Journal Context').first().json;\nconst input = $input.first().json;\nconst rawError = input.error;\nconst detail = typeof rawError === 'string'\n  ? rawError\n  : (rawError && (rawError.message || rawError.description)) || input.message || 'Google Sheets journal write failed';\nreturn [{\n  json: {\n    ...context,\n    journal: { enabled: true, status: 'failed', error: String(detail).slice(0, 1000) },\n    warnings: [...(context.warnings || []), 'journal_write_failed'],\n    hasWarning: true,\n  },\n}];"
+        "jsCode": "const context = $('Build Journal Context').first().json;\nconst input = $input.first().json;\nconst rawError = input.error;\nconst detail = typeof rawError === 'string'\n  ? rawError\n  : (rawError && (rawError.message || rawError.description)) || input.message || 'Google Sheets journal write failed';\nconst retryConfig = context.config.retry || {};\nconst operation = context.operation;\nconst attempts = Number(operation.attempts || 1);\nconst maxAttempts = Math.max(1, Number(retryConfig.maxAttempts || 5));\nconst retryable = /(^|\\D)429(\\D|$)|rate limit|too many requests|timeout|timed out|ECONN|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|network|refused|offline|socket hang up|connection reset|connection refused|ENETUNREACH|EHOSTUNREACH|5\\d\\d/i.test(String(detail)) && attempts < maxAttempts;\nconst baseDelay = Math.max(1, Number(retryConfig.baseDelaySeconds || 30));\nconst maxDelay = Math.max(baseDelay, Number(retryConfig.maxDelaySeconds || 3600));\nconst retryAfterMatch = String(detail).match(/Retry-After:\\s*([0-9]+)/i);\nconst retryAfterSeconds = retryAfterMatch ? Math.max(1, Number(retryAfterMatch[1])) : null;\nconst delaySeconds = retryAfterSeconds !== null ? Math.min(maxDelay, retryAfterSeconds) : Math.min(maxDelay, baseDelay * Math.pow(2, Math.max(0, attempts - 1)));\nconst jitterSeconds = retryAfterSeconds !== null ? 0 : Math.floor(delaySeconds * 0.2 * Math.random());\nconst retryAt = retryable ? new Date(Date.now() + (delaySeconds + jitterSeconds) * 1000).toISOString() : null;\nconst stateUpdate = {\n  status: retryable ? 'retry_scheduled' : 'needs_reconciliation',\n  journal_status: 'failed',\n  journal_error: String(detail).slice(0, 1000),\n  last_error: String(detail).slice(0, 1000),\n  next_attempt_at: retryAt,\n};\nreturn [{\n  json: {\n    ...context,\n    journal: { enabled: true, status: 'failed', error: String(detail).slice(0, 1000) },\n    warnings: [...(context.warnings || []), 'journal_write_failed'],\n    hasWarning: true,\n    retryScheduled: retryable,\n    needsReconciliation: !retryable,\n    nextAttemptAt: retryAt,\n    stateUpdate,\n  },\n}];"
       },
       "id": "39d73189-f725-4082-a812-6d9d31a5dfcb",
       "name": "Build Journal Warning",
@@ -887,7 +908,7 @@
     {
       "parameters": {
         "mode": "runOnceForAllItems",
-        "jsCode": "const context = $('Build Journal Context').first().json;\nconst input = $input.first().json;\nconst rawError = input.error;\nconst detail = typeof rawError === 'string'\n  ? rawError\n  : (rawError && (rawError.message || rawError.description)) || input.message || 'Notification message build failed';\nreturn [{\n  json: {\n    ...context,\n    notifications: {\n      enabled: true,\n      status: 'failed',\n      channels: context.config.notifications.channels,\n      error: String(detail).slice(0, 1000),\n    },\n    warnings: [...(context.warnings || []), 'notification_send_failed'],\n    hasWarning: true,\n  },\n}];"
+        "jsCode": "const context = $('Build Journal Context').first().json;\nconst input = $input.first().json;\nconst rawError = input.error;\nconst detail = typeof rawError === 'string'\n  ? rawError\n  : (rawError && (rawError.message || rawError.description)) || input.message || 'Notification message build failed';\nreturn [{\n  json: {\n    ...context,\n    notifications: { enabled: true, status: 'failed', channels: context.config.notifications.channels, error: String(detail).slice(0, 1000) },\n    warnings: [...(context.warnings || []), 'notification_send_failed'],\n    needsReconciliation: true,\n    hasWarning: true,\n  },\n}];"
       },
       "id": "84295cda-ceb5-4579-a443-64aea1ecd4aa",
       "name": "Build Notification Message Failure",
@@ -925,7 +946,7 @@
     {
       "parameters": {
         "mode": "runOnceForAllItems",
-        "jsCode": "const context = $('Build Notification Message').first().json;\nreturn [{\n  json: {\n    ...context,\n    notifications: {\n      enabled: true,\n      status: 'sent',\n      channels: context.config.notifications.channels,\n    },\n    hasWarning: Boolean(context.hasWarning),\n  },\n}];"
+        "jsCode": "const context = $('Build Notification Message').first().json;\nconst telegram = $('Notification Adapter - Telegram').first().json;\nconst messageId = telegram && telegram.result ? telegram.result.message_id : null;\nreturn [{\n  json: {\n    ...context,\n    notifications: { enabled: true, status: 'sent', channels: context.config.notifications.channels, messageId },\n    stateUpdate: {\n      status: 'processing',\n      telegram_status: 'sent',\n      telegram_message_id: messageId === null || messageId === undefined ? null : String(messageId),\n      telegram_error: null,\n    },\n    hasWarning: Boolean(context.hasWarning),\n  },\n}];"
       },
       "id": "a0602633-efc5-4c74-86e7-f32addc50332",
       "name": "Build Notifications Sent",
@@ -939,7 +960,7 @@
     {
       "parameters": {
         "mode": "runOnceForAllItems",
-        "jsCode": "const context = $('Build Notification Message').first().json;\nconst input = $input.first().json;\nconst rawError = input.error;\nconst detail = typeof rawError === 'string'\n  ? rawError\n  : (rawError && (rawError.message || rawError.description)) || input.message || 'Telegram send failed';\nreturn [{\n  json: {\n    ...context,\n    notifications: {\n      enabled: true,\n      status: 'failed',\n      channels: context.config.notifications.channels,\n      error: String(detail).slice(0, 1000),\n    },\n    warnings: [...(context.warnings || []), 'notification_send_failed'],\n    hasWarning: true,\n  },\n}];"
+        "jsCode": "const context = $('Build Notification Message').first().json;\nconst input = $input.first().json;\nconst rawError = input.error;\nconst detail = typeof rawError === 'string'\n  ? rawError\n  : (rawError && (rawError.message || rawError.description)) || input.message || 'Telegram send failed';\nreturn [{\n  json: {\n    ...context,\n    notifications: { enabled: true, status: 'failed', channels: context.config.notifications.channels, error: String(detail).slice(0, 1000) },\n    warnings: [...(context.warnings || []), 'notification_send_failed'],\n    needsReconciliation: true,\n    hasWarning: true,\n  },\n}];"
       },
       "id": "957f9ea3-25a3-4a33-b6ca-6359e1b455fc",
       "name": "Build Notification Warning",
@@ -967,7 +988,7 @@
     {
       "parameters": {
         "mode": "runOnceForAllItems",
-        "jsCode": "const context = $input.first().json;\nconst { lead, meta, crm, config } = context;\nconst journal = context.journal || { enabled: false, status: 'disabled' };\nconst notifications = context.notifications || { enabled: false, status: 'disabled', channels: [] };\nconst warnings = Array.isArray(context.warnings) ? [...context.warnings] : [];\nconst saved = ['created', 'updated'].includes(crm.status) || journal.status === 'saved';\nconst notified = notifications.status === 'sent';\nlet status = crm.status;\nif (crm.status === 'skipped') status = 'crm_skipped';\nif (notifications.status === 'failed') {\n  if (crm.status === 'created') status = 'saved_with_notification_error';\n  else if (crm.status === 'updated') status = 'updated_with_notification_error';\n  else if (crm.status === 'skipped') status = 'crm_skipped_with_notification_error';\n}\nconst httpStatus = crm.httpStatus || (crm.status === 'updated' ? 200 : crm.status === 'skipped' ? 202 : 201);\nconst response = {\n  ok: crm.status !== 'failed',\n  status,\n  requestId: meta.requestId,\n  externalId: lead.externalId,\n  receivedAt: meta.receivedAt,\n  displayTime: meta.displayReceivedAt,\n  saved,\n  notified,\n  crm: {\n    provider: crm.provider,\n    status: crm.status,\n    contactId: crm.contactId || null,\n    matchedBy: crm.matchedBy || null,\n    matchCount: crm.matchCount || 0,\n    reason: crm.reason || null,\n  },\n  journal: { enabled: journal.enabled, status: journal.status },\n  notifications: {\n    enabled: notifications.enabled,\n    status: notifications.status,\n    channels: notifications.channels || [],\n  },\n  warnings,\n};\nreturn [{ json: { response, httpStatus, hasWarning: Boolean(context.hasWarning) } }];"
+        "jsCode": "const context = $input.first().json;\nconst { lead, meta, crm, config, operation } = context;\nconst journal = context.journal || { enabled: false, status: 'disabled' };\nconst notifications = context.notifications || { enabled: false, status: 'disabled', channels: [] };\nconst warnings = Array.isArray(context.warnings) ? [...context.warnings] : [];\nconst retryScheduled = Boolean(context.retryScheduled);\nconst needsReconciliation = Boolean(context.needsReconciliation);\nconst operationStatus = retryScheduled ? 'retry_scheduled' : needsReconciliation ? 'needs_reconciliation' : 'completed';\nlet status = crm.status === 'skipped' ? 'crm_skipped' : crm.status;\nif (retryScheduled) status = 'retry_scheduled';\nelse if (needsReconciliation) status = 'needs_reconciliation';\nconst httpStatus = retryScheduled || needsReconciliation ? 202 : (crm.httpStatus || (crm.status === 'updated' ? 200 : crm.status === 'skipped' ? 202 : 201));\nconst saved = ['created', 'updated'].includes(crm.status) || journal.status === 'saved';\nconst notified = notifications.status === 'sent';\nconst response = {\n  ok: crm.status !== 'failed',\n  status,\n  requestId: meta.requestId,\n  operationId: operation ? operation.id : null,\n  operationStatus,\n  externalId: lead.externalId,\n  receivedAt: meta.receivedAt,\n  displayTime: meta.displayReceivedAt,\n  saved,\n  notified,\n  retryAt: context.nextAttemptAt || null,\n  crm: {\n    provider: crm.provider,\n    status: crm.status,\n    contactId: crm.contactId || null,\n    matchedBy: crm.matchedBy || null,\n    matchCount: crm.matchCount || 0,\n    reason: crm.reason || null,\n  },\n  journal: { enabled: journal.enabled, status: journal.status },\n  notifications: {\n    enabled: notifications.enabled,\n    status: notifications.status,\n    channels: notifications.channels || [],\n    messageId: notifications.messageId || null,\n  },\n  warnings,\n};\nconst stateUpdate = {\n  status: operationStatus,\n  response,\n  next_attempt_at: context.nextAttemptAt || null,\n  last_error: warnings.length ? warnings.join('; ') : null,\n  crm_provider: crm.provider,\n  crm_status: crm.status,\n  crm_contact_id: crm.contactId || null,\n  journal_status: journal.status,\n  journal_error: journal.error || null,\n  telegram_status: notifications.status,\n  telegram_message_id: notifications.messageId || null,\n  telegram_error: notifications.error || null,\n};\nreturn [{ json: { response, httpStatus, hasWarning: Boolean(context.hasWarning || retryScheduled || needsReconciliation), operationId: operation ? operation.id : null, stateUpdate } }];"
       },
       "id": "966f35e5-e6d4-408d-ab91-2c5e9e74139d",
       "name": "Build Response",
@@ -1103,6 +1124,830 @@
         -880,
         360
       ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const validated = $('Validate Lead').first().json;\nconst config = validated.config;\nconst webhook = $('Lead Webhook').first().json;\nconst headers = webhook.headers || {};\nconst rawHeaderKey = headers['idempotency-key'] ?? headers['Idempotency-Key'] ?? '';\nconst headerKey = typeof rawHeaderKey === 'string' ? rawHeaderKey.trim() : String(rawHeaderKey || '').trim();\nconst rawOperationId = headers['x-operation-id'] ?? headers['X-Operation-Id'] ?? '';\nconst recovery = String(headers['x-recovery'] || '').toLowerCase() === '1';\nconst operationIdHeader = recovery && typeof rawOperationId === 'string' ? rawOperationId.trim() : '';\nconst idempotencyConfig = config.idempotency || {};\nconst retryConfig = config.retry || {};\nlet idempotencyKey = validated.lead.externalId || headerKey || null;\nif (idempotencyConfig.enabled === false) idempotencyKey = null;\nconst significant = {\n  name: validated.lead.name,\n  email: validated.lead.email,\n  phone: validated.lead.phone,\n  source: validated.lead.source,\n  message: validated.lead.message,\n  externalId: validated.lead.externalId,\n};\nreturn [{\n  json: {\n    lead: validated.lead,\n    meta: validated.meta,\n    config,\n    operationInput: {\n      clientId: config.clientName || 'client',\n      source: validated.lead.source || (config.source && config.source.defaultSource) || 'unknown',\n      idempotencyKey,\n      operationId: operationIdHeader || null,\n      fingerprint: JSON.stringify(significant),\n      rawPayload: webhook.body,\n      recovery,\n      maxAttempts: Math.max(1, Number(retryConfig.maxAttempts || 5)),\n      processingTimeoutSeconds: Math.max(30, Number(retryConfig.processingTimeoutSeconds || 300)),\n    },\n  },\n}];"
+      },
+      "id": "5ad47b89-b547-4a8c-84fa-04bdeb7b0742",
+      "name": "Build Operation",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -880,
+        -60
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "select app.reserve_lead_operation($1,$2,$3,$4,$5::jsonb,$6,$7,$8,$9::uuid) as result",
+        "options": {
+          "queryReplacement": "={{ [$json.operationInput.clientId, $json.operationInput.source, $json.operationInput.idempotencyKey, $json.operationInput.fingerprint, $json.operationInput.rawPayload, $json.operationInput.recovery, $json.operationInput.maxAttempts, $json.operationInput.processingTimeoutSeconds, $json.operationInput.operationId] }}"
+        }
+      },
+      "id": "9823bbd5-51ef-486f-bde2-40af1b102276",
+      "name": "Reserve Operation",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.8,
+      "position": [
+        -660,
+        -60
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const reserved = $input.first().json.result;\nconst base = $('Build Operation').first().json;\nconst operation = reserved && reserved.operation ? reserved.operation : null;\nconst outcome = reserved ? reserved.outcome : 'not_found';\nlet decision = 'process';\nif (outcome === 'replay') decision = 'replay';\nelse if (outcome === 'conflict') decision = 'conflict';\nelse if (outcome === 'in_progress') decision = 'in_progress';\nelse if (outcome === 'max_attempts' || outcome === 'current') decision = 'terminal';\nelse if (outcome === 'not_found') decision = 'not_found';\nreturn [{ json: { ...base, operation, decision, operationOutcome: outcome } }];"
+      },
+      "id": "aab608a2-245d-483b-a445-c5fe5afc75a6",
+      "name": "Decide Operation",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -440,
+        -60
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "e914d4c8-fa2e-4786-a610-ab5c8b9c6e5a",
+              "leftValue": "={{ $json.decision === 'process' }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "0aa74df2-2d41-4808-927c-21189c62d631",
+      "name": "Operation Can Process?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -220,
+        -60
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const ctx = $('Decide Operation').first().json;\nconst op = ctx.operation;\nlet httpStatus = 200;\nlet response;\nif (ctx.decision === 'replay') {\n  const stored = op && op.response ? op.response : {};\n  response = { ...stored, ok: stored.ok ?? true, replayed: true, operationId: op ? op.id : null };\n} else if (ctx.decision === 'conflict') {\n  httpStatus = 409;\n  response = { ok: false, error: 'idempotency_conflict', message: 'Idempotency key was already used with different lead data.', operationId: op ? op.id : null };\n} else if (ctx.decision === 'in_progress') {\n  httpStatus = 202;\n  response = { ok: true, status: 'in_progress', operationId: op ? op.id : null, operationStatus: op ? op.status : null, retryAt: op ? op.next_attempt_at : null };\n} else if (ctx.decision === 'not_found') {\n  httpStatus = 404;\n  response = { ok: false, error: 'operation_not_found', message: 'Recovery operation was not found.' };\n} else {\n  httpStatus = 200;\n  response = {\n    ok: op ? op.status !== 'failed' : false,\n    status: op ? op.status : 'unknown',\n    operationId: op ? op.id : null,\n    crm: op ? { provider: op.crm_provider, status: op.crm_status, contactId: op.crm_contact_id } : null,\n    journal: op ? { status: op.journal_status } : null,\n    notifications: op ? { status: op.telegram_status } : null,\n  };\n}\nreturn [{ json: { response, httpStatus } }];"
+      },
+      "id": "0a6ac11c-3f75-4cf4-b477-285d3d166a28",
+      "name": "Build Replay Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        0,
+        180
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json.response }}",
+        "options": {
+          "responseCode": "={{ $json.httpStatus }}",
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Content-Type",
+                "value": "application/json"
+              }
+            ]
+          }
+        }
+      },
+      "id": "fe2b2105-7c4e-44b4-a6f4-b964a007f774",
+      "name": "Respond Operation",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        220,
+        180
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const requestId = $execution && $execution.id ? String($execution.id) : null;\nreturn [{\n  json: {\n    response: {\n      ok: false,\n      error: 'state_store_failed',\n      message: 'Lead operation state could not be persisted; no success was reported.',\n      requestId,\n    },\n    httpStatus: 503,\n  },\n}];"
+      },
+      "id": "5840b0e2-16ed-4a05-98c6-d44eabe6c72f",
+      "name": "Build State Failure Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        0,
+        520
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json.response }}",
+        "options": {
+          "responseCode": "={{ $json.httpStatus }}",
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Content-Type",
+                "value": "application/json"
+              }
+            ]
+          }
+        }
+      },
+      "id": "a1016977-b0c8-46a6-a264-b42404171111",
+      "name": "Respond State Failure",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        220,
+        520
+      ]
+    },
+    {
+      "parameters": {
+        "errorType": "errorMessage",
+        "errorMessage": "={{ 'Lead operation state failure. See execution ' + $execution.id + '.' }}"
+      },
+      "id": "4646ddf1-71a2-4525-b7b0-ff48e8732e10",
+      "name": "Stop With State Error",
+      "type": "n8n-nodes-base.stopAndError",
+      "typeVersion": 1,
+      "position": [
+        440,
+        520
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "ccf693ff-da88-4a1e-87d4-fa36308e50d5",
+              "leftValue": "={{ $json.operation && ['created','updated','skipped'].includes($json.operation.crm_status) }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "a3660bd6-97b9-4337-a8c4-a29df75d5e51",
+      "name": "CRM Already Done?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        0,
+        -280
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const ctx = $input.first().json;\nconst op = ctx.operation;\nconst status = op.crm_status;\nconst crm = {\n  provider: op.crm_provider || ctx.config.crm.provider,\n  status,\n  contactId: op.crm_contact_id || null,\n  matchedBy: null,\n  matchCount: 0,\n  reason: status === 'skipped' ? 'previous_skip' : null,\n  httpStatus: status === 'created' ? 201 : status === 'updated' ? 200 : 202,\n};\nreturn [{ json: { lead: ctx.lead, meta: ctx.meta, config: ctx.config, operation: op, crm, journal: null, notifications: null, warnings: [], hasWarning: false } }];"
+      },
+      "id": "1ad49db8-554e-4323-93d3-fd151bb7524e",
+      "name": "Restore CRM Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        -360
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const input = $input.first().json;\nconst ctx = $('Decide Operation').first().json;\nconst operation = ctx.operation;\nconst crm = input.crm;\nconst crmStatus = crm.status === 'updated' ? 'updated' : crm.status === 'skipped' ? 'skipped' : crm.status === 'created' ? 'created' : 'failed';\nconst stateUpdate = {\n  status: 'processing',\n  crm_provider: crm.provider,\n  crm_status: crmStatus,\n  crm_contact_id: crm.contactId || null,\n  crm_error: null,\n  last_error: null,\n};\nreturn [{ json: { ...input, operation, stateUpdate } }];"
+      },
+      "id": "be9380d3-f4fe-448a-80a6-521c98eb1b6f",
+      "name": "Build CRM Success State",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        -80
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "select app.save_operation_state($1::uuid,$2::jsonb) as result",
+        "options": {
+          "queryReplacement": "={{ [$json.operation.id, $json.stateUpdate] }}"
+        }
+      },
+      "id": "0e94e763-8e6f-4f40-b342-213dc93c0e76",
+      "name": "Save CRM State",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.8,
+      "position": [
+        440,
+        -80
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "return [{ json: $('Build CRM Success State').first().json }];"
+      },
+      "id": "7f25f4be-3834-4bb1-902f-cb71ac9676c2",
+      "name": "Restore CRM Context",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        660,
+        -80
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "select app.save_operation_state($1::uuid,$2::jsonb) as result",
+        "options": {
+          "queryReplacement": "={{ [$json.operation.id, $json.stateUpdate] }}"
+        }
+      },
+      "id": "9fb7e6d0-e472-40e7-a833-5e6852bd3f74",
+      "name": "Save CRM Failure State",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.8,
+      "position": [
+        440,
+        340
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "return [{ json: $('Build CRM Failure').first().json }];"
+      },
+      "id": "daed228b-4925-4cab-8dc0-a76c081ff0b2",
+      "name": "Restore CRM Failure Context",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        660,
+        340
+      ]
+    },
+    {
+      "parameters": {
+        "authentication": "oAuth2",
+        "resource": "sheet",
+        "operation": "read",
+        "documentId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "={{ $('Validate Client Config').first().json.config.crm.googleSheets.spreadsheetId }}"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "={{ $('Validate Client Config').first().json.config.crm.googleSheets.leadsSheetName }}"
+        },
+        "options": {}
+      },
+      "id": "e6ca4820-6c78-43e6-900f-4ea93aa51c9e",
+      "name": "Read CRM Leads",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        0,
+        -480
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const ctx = $('Decide Operation').first().json;\nconst rows = $input.all().map((item) => item.json).filter((row) => row && typeof row === 'object');\nconst columns = ctx.config.crm.googleSheets.columns;\nconst externalHeader = columns.externalId;\nconst requestHeader = columns.requestId;\nconst externalId = ctx.lead.externalId;\nconst operationId = ctx.operation.id;\nconst found = rows.find((row) =>\n  (externalHeader && externalId && String(row[externalHeader]) === String(externalId)) ||\n  (requestHeader && String(row[requestHeader]) === String(operationId))\n);\nreturn [{ json: { ...ctx, existingCrm: Boolean(found), existingCrmRow: found || null } }];"
+      },
+      "id": "a1d31d5d-0862-4865-8531-b433613d42f0",
+      "name": "Check Existing CRM Row",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        -480
+      ],
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "167e29b7-9848-416c-9f48-a47a9f232f85",
+              "leftValue": "={{ $json.existingCrm === true }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "87cf133e-cc12-48e4-9ce2-6264fc8ce7f2",
+      "name": "CRM Sheet Row Found?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        440,
+        -480
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const ctx = $('Check Existing CRM Row').first().json;\nconst crm = {\n  provider: 'google_sheets',\n  status: 'created',\n  contactId: null,\n  matchedBy: null,\n  matchCount: 1,\n  reason: 'reconciled_existing_row',\n  httpStatus: 201,\n};\nreturn [{ json: { lead: ctx.lead, meta: ctx.meta, config: ctx.config, operation: ctx.operation, crm, journal: null, notifications: null, warnings: [], hasWarning: false } }];"
+      },
+      "id": "01ee8249-4e9b-4125-8b73-bc3c7489de99",
+      "name": "Restore Existing CRM Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        660,
+        -480
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "14db006f-2ac0-41b8-95ff-2e87cce6e87c",
+              "leftValue": "={{ $json.operation && $json.operation.journal_status === 'saved' }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "4508429c-bd86-46d7-b316-64b03ab5cacf",
+      "name": "Journal Already Succeeded?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1540,
+        -80
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const ctx = $input.first().json;\nreturn [{ json: { ...ctx, journal: { enabled: true, status: 'saved' }, warnings: ctx.warnings || [], hasWarning: false } }];"
+      },
+      "id": "b99b46c2-0477-476d-8227-9bde2830a311",
+      "name": "Restore Journal Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1760,
+        -160
+      ]
+    },
+    {
+      "parameters": {
+        "authentication": "oAuth2",
+        "resource": "sheet",
+        "operation": "read",
+        "documentId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "={{ $('Validate Client Config').first().json.config.journal.googleSheets.spreadsheetId }}"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "={{ $('Validate Client Config').first().json.config.journal.googleSheets.sheetName }}"
+        },
+        "options": {}
+      },
+      "id": "ae881515-858f-4956-bfac-371e275d0d81",
+      "name": "Read Journal",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        1760,
+        -260
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const ctx = $('Build Journal Context').first().json;\nconst rows = $input.all().map((item) => item.json).filter((row) => row && typeof row === 'object');\nconst columns = ctx.config.journal.googleSheets.columns;\nconst externalHeader = columns.externalId;\nconst requestHeader = columns.requestId;\nconst externalId = ctx.lead.externalId;\nconst operationId = ctx.operation.id;\nconst found = rows.find((row) =>\n  (externalHeader && externalId && String(row[externalHeader]) === String(externalId)) ||\n  (requestHeader && String(row[requestHeader]) === String(operationId))\n);\nreturn [{ json: { ...ctx, existingJournal: Boolean(found), existingJournalRow: found || null } }];"
+      },
+      "id": "a56db7d8-cea2-477f-85e2-99dc681f7f72",
+      "name": "Check Existing Journal Row",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1980,
+        -260
+      ],
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "03828b9e-b8e1-414e-a01c-2e6cdbad4630",
+              "leftValue": "={{ $json.existingJournal === true }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "22a28e89-9872-4265-8c3b-1538e54b43df",
+      "name": "Journal Row Found?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2200,
+        -260
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const ctx = $('Check Existing Journal Row').first().json;\nreturn [{ json: { ...ctx, journal: { enabled: true, status: 'saved', reconciled: true }, warnings: ctx.warnings || [], hasWarning: false } }];"
+      },
+      "id": "f709a066-b263-4756-b11b-49add5be2aed",
+      "name": "Restore Existing Journal Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2420,
+        -260
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "select app.save_operation_state($1::uuid,$2::jsonb) as result",
+        "options": {
+          "queryReplacement": "={{ [$json.operation.id, $json.stateUpdate] }}"
+        }
+      },
+      "id": "2720f559-f9c3-4ad0-94cb-34848a4a920c",
+      "name": "Save Journal State",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.8,
+      "position": [
+        2420,
+        -160
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "return [{ json: $('Build Journal Saved').first().json }];"
+      },
+      "id": "a9cdedd0-865f-4894-a303-e6310eee83d5",
+      "name": "Restore Journal Context",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2640,
+        -160
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "select app.save_operation_state($1::uuid,$2::jsonb) as result",
+        "options": {
+          "queryReplacement": "={{ [$json.operation.id, $json.stateUpdate] }}"
+        }
+      },
+      "id": "014b875d-5218-45f5-a1ed-57d224bdae86",
+      "name": "Save Journal Failure State",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.8,
+      "position": [
+        2420,
+        20
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "return [{ json: $('Build Journal Warning').first().json }];"
+      },
+      "id": "feb2bb21-c1db-4bbb-9e9c-2b2e7489362a",
+      "name": "Restore Journal Failure Context",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2640,
+        20
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "a5c91efc-f507-48df-ba10-0eca47b8e31d",
+              "leftValue": "={{ $json.operation && ['sent','disabled'].includes($json.operation.telegram_status) }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "29637bb2-3090-406a-a645-eae4bfc222e4",
+      "name": "Telegram Already Done?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2860,
+        -80
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const ctx = $input.first().json;\nconst op = ctx.operation;\nconst status = op.telegram_status;\nconst notifications = status === 'sent'\n  ? { enabled: true, status: 'sent', channels: ctx.config.notifications.channels, messageId: op.telegram_message_id }\n  : status === 'disabled'\n    ? { enabled: false, status: 'disabled', channels: [] }\n    : { enabled: true, status: 'failed', channels: ctx.config.notifications.channels, error: op.telegram_error || 'previous telegram failure' };\nreturn [{ json: { ...ctx, notifications, needsReconciliation: status === 'failed' || status === 'needs_reconciliation', warnings: ctx.warnings || [], hasWarning: status === 'failed' || status === 'needs_reconciliation' } }];"
+      },
+      "id": "a19c075f-2a00-43ad-94b3-0d81f630146d",
+      "name": "Restore Notification Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3080,
+        -160
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "select app.save_operation_state($1::uuid,$2::jsonb) as result",
+        "options": {
+          "queryReplacement": "={{ [$json.operationId, $json.stateUpdate] }}"
+        }
+      },
+      "id": "41868144-37d6-4734-bc9e-8bd9395a56d4",
+      "name": "Save Final State",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.8,
+      "position": [
+        3520,
+        -80
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "return [{ json: $('Build Response').first().json }];"
+      },
+      "id": "07e59c83-a132-445c-bcdd-1e5d7f259bc7",
+      "name": "Restore Final Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3740,
+        -80
+      ]
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 1
+            }
+          ]
+        }
+      },
+      "id": "0d3e08de-e761-412a-955b-976f2488e4fe",
+      "name": "Schedule Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.4,
+      "position": [
+        -440,
+        760
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT id, raw_payload, idempotency_key\nFROM app.lead_operations\nWHERE (status = 'retry_scheduled' AND (next_attempt_at IS NULL OR next_attempt_at <= now()))\n   OR (status = 'processing' AND updated_at < now() - interval '5 minutes')\nORDER BY COALESCE(next_attempt_at, updated_at) ASC\nLIMIT 10",
+        "options": {
+          "queryReplacement": ""
+        }
+      },
+      "id": "1e5e1a6f-1264-48b5-a82a-0c55404b1406",
+      "name": "Select Due Operations",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.8,
+      "position": [
+        -220,
+        760
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://127.0.0.1:5678/webhook/lead-intake",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json.raw_payload }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Recovery",
+              "value": "1"
+            },
+            {
+              "name": "X-Operation-Id",
+              "value": "={{ $json.id }}"
+            },
+            {
+              "name": "Idempotency-Key",
+              "value": "={{ $json.idempotency_key || \"\" }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "84e6636e-743e-4df5-becd-effbfa85dbdd",
+      "name": "Recovery Request",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        0,
+        760
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const response = $input.first().json;\nconst status = Number(response.statusCode || 0);\nif (status >= 200 && status < 300) {\n  return [{ json: response.body && typeof response.body === 'object' ? response.body : {} }];\n}\nconst headers = response.headers || {};\nconst retryAfter = headers['retry-after'] ?? headers['Retry-After'] ?? '';\nconst body = typeof response.body === 'string' ? response.body : JSON.stringify(response.body || {});\nthrow new Error(`HubSpot search HTTP ${status}${retryAfter ? ` Retry-After: ${retryAfter}` : ''}: ${String(body).slice(0, 800)}`);"
+      },
+      "id": "af8a012f-3b07-4308-ad2f-4bd12ee0b622",
+      "name": "Validate HubSpot Search HTTP",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        -240
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const response = $input.first().json;\nconst status = Number(response.statusCode || 0);\nif (status >= 200 && status < 300) {\n  return [{ json: response.body && typeof response.body === 'object' ? response.body : {} }];\n}\nconst headers = response.headers || {};\nconst retryAfter = headers['retry-after'] ?? headers['Retry-After'] ?? '';\nconst body = typeof response.body === 'string' ? response.body : JSON.stringify(response.body || {});\nthrow new Error(`HubSpot create HTTP ${status}${retryAfter ? ` Retry-After: ${retryAfter}` : ''}: ${String(body).slice(0, 800)}`);"
+      },
+      "id": "9a79a382-a7ff-4c75-999e-2e882bd01298",
+      "name": "Validate HubSpot Create HTTP",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        880,
+        -180
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const response = $input.first().json;\nconst status = Number(response.statusCode || 0);\nif (status >= 200 && status < 300) {\n  return [{ json: response.body && typeof response.body === 'object' ? response.body : {} }];\n}\nconst headers = response.headers || {};\nconst retryAfter = headers['retry-after'] ?? headers['Retry-After'] ?? '';\nconst body = typeof response.body === 'string' ? response.body : JSON.stringify(response.body || {});\nthrow new Error(`HubSpot update HTTP ${status}${retryAfter ? ` Retry-After: ${retryAfter}` : ''}: ${String(body).slice(0, 800)}`);"
+      },
+      "id": "13957ec9-4445-4e15-ae31-2a0d70c8ae3b",
+      "name": "Validate HubSpot Update HTTP",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        880,
+        -380
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "return [{ json: $('Build Notifications Sent').first().json }];"
+      },
+      "id": "a0e6a687-14a7-4487-9dcc-b8eee9313a14",
+      "name": "Restore Notification Context",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3300,
+        -80
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "select app.save_operation_state($1::uuid,$2::jsonb) as result",
+        "options": {
+          "queryReplacement": "={{ [$json.operation.id, $json.stateUpdate] }}"
+        }
+      },
+      "id": "39712515-f2d1-4e29-be2c-9f4b6a364871",
+      "name": "Save Notification State",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.8,
+      "position": [
+        3080,
+        -80
+      ],
+      "onError": "continueErrorOutput"
     }
   ],
   "pinData": {},
@@ -1205,7 +2050,7 @@
       "main": [
         [
           {
-            "node": "CRM Provider Is HubSpot?",
+            "node": "Build Operation",
             "type": "main",
             "index": 0
           }
@@ -1252,7 +2097,7 @@
       "main": [
         [
           {
-            "node": "Map CRM Sheet Row",
+            "node": "Read CRM Leads",
             "type": "main",
             "index": 0
           }
@@ -1306,7 +2151,7 @@
       "main": [
         [
           {
-            "node": "Build Journal Context",
+            "node": "Build CRM Success State",
             "type": "main",
             "index": 0
           }
@@ -1346,7 +2191,7 @@
       "main": [
         [
           {
-            "node": "Resolve HubSpot Match",
+            "node": "Validate HubSpot Search HTTP",
             "type": "main",
             "index": 0
           }
@@ -1411,7 +2256,7 @@
       "main": [
         [
           {
-            "node": "Normalize HubSpot Result",
+            "node": "Validate HubSpot Create HTTP",
             "type": "main",
             "index": 0
           }
@@ -1429,7 +2274,7 @@
       "main": [
         [
           {
-            "node": "Normalize HubSpot Result",
+            "node": "Validate HubSpot Update HTTP",
             "type": "main",
             "index": 0
           }
@@ -1447,7 +2292,7 @@
       "main": [
         [
           {
-            "node": "Build Journal Context",
+            "node": "Build CRM Success State",
             "type": "main",
             "index": 0
           }
@@ -1458,7 +2303,7 @@
       "main": [
         [
           {
-            "node": "Build Journal Context",
+            "node": "Build CRM Success State",
             "type": "main",
             "index": 0
           }
@@ -1469,7 +2314,7 @@
       "main": [
         [
           {
-            "node": "Build Journal Context",
+            "node": "Build CRM Success State",
             "type": "main",
             "index": 0
           }
@@ -1480,7 +2325,7 @@
       "main": [
         [
           {
-            "node": "Errors Enabled?",
+            "node": "Save CRM Failure State",
             "type": "main",
             "index": 0
           }
@@ -1542,7 +2387,7 @@
       "main": [
         [
           {
-            "node": "Journal Enabled?",
+            "node": "Journal Already Succeeded?",
             "type": "main",
             "index": 0
           }
@@ -1553,7 +2398,7 @@
       "main": [
         [
           {
-            "node": "Map Journal Row",
+            "node": "Read Journal",
             "type": "main",
             "index": 0
           }
@@ -1600,7 +2445,7 @@
       "main": [
         [
           {
-            "node": "Notifications Enabled?",
+            "node": "Save Journal State",
             "type": "main",
             "index": 0
           }
@@ -1611,7 +2456,7 @@
       "main": [
         [
           {
-            "node": "Notifications Enabled?",
+            "node": "Save Journal Failure State",
             "type": "main",
             "index": 0
           }
@@ -1633,7 +2478,7 @@
       "main": [
         [
           {
-            "node": "Build Notification Message",
+            "node": "Telegram Already Done?",
             "type": "main",
             "index": 0
           }
@@ -1687,7 +2532,7 @@
       "main": [
         [
           {
-            "node": "Build Response",
+            "node": "Save Notification State",
             "type": "main",
             "index": 0
           }
@@ -1731,7 +2576,7 @@
       "main": [
         [
           {
-            "node": "Respond Lead Intake",
+            "node": "Save Final State",
             "type": "main",
             "index": 0
           }
@@ -1776,6 +2621,561 @@
         [
           {
             "node": "Stop With Config Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Reserve Operation": {
+      "main": [
+        [
+          {
+            "node": "Decide Operation",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build State Failure Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Decide Operation": {
+      "main": [
+        [
+          {
+            "node": "Operation Can Process?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Operation Can Process?": {
+      "main": [
+        [
+          {
+            "node": "CRM Already Done?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Replay Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Replay Response": {
+      "main": [
+        [
+          {
+            "node": "Respond Operation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build State Failure Response": {
+      "main": [
+        [
+          {
+            "node": "Respond State Failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Respond State Failure": {
+      "main": [
+        [
+          {
+            "node": "Stop With State Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CRM Already Done?": {
+      "main": [
+        [
+          {
+            "node": "Restore CRM Result",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "CRM Provider Is HubSpot?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Restore CRM Result": {
+      "main": [
+        [
+          {
+            "node": "Build Journal Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Restore Existing CRM Result": {
+      "main": [
+        [
+          {
+            "node": "Build CRM Success State",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build CRM Success State": {
+      "main": [
+        [
+          {
+            "node": "Save CRM State",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save CRM State": {
+      "main": [
+        [
+          {
+            "node": "Restore CRM Context",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build State Failure Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Restore CRM Context": {
+      "main": [
+        [
+          {
+            "node": "Build Journal Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save CRM Failure State": {
+      "main": [
+        [
+          {
+            "node": "Restore CRM Failure Context",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build State Failure Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Restore CRM Failure Context": {
+      "main": [
+        [
+          {
+            "node": "Errors Enabled?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read CRM Leads": {
+      "main": [
+        [
+          {
+            "node": "Check Existing CRM Row",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build CRM Failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Existing CRM Row": {
+      "main": [
+        [
+          {
+            "node": "CRM Sheet Row Found?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CRM Sheet Row Found?": {
+      "main": [
+        [
+          {
+            "node": "Restore Existing CRM Result",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Map CRM Sheet Row",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Operation": {
+      "main": [
+        [
+          {
+            "node": "Reserve Operation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Journal Already Succeeded?": {
+      "main": [
+        [
+          {
+            "node": "Restore Journal Result",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Journal Enabled?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Restore Journal Result": {
+      "main": [
+        [
+          {
+            "node": "Notifications Enabled?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Journal": {
+      "main": [
+        [
+          {
+            "node": "Check Existing Journal Row",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Journal Warning",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Existing Journal Row": {
+      "main": [
+        [
+          {
+            "node": "Journal Row Found?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Journal Row Found?": {
+      "main": [
+        [
+          {
+            "node": "Restore Existing Journal Result",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Map Journal Row",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Restore Existing Journal Result": {
+      "main": [
+        [
+          {
+            "node": "Notifications Enabled?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save Journal State": {
+      "main": [
+        [
+          {
+            "node": "Restore Journal Context",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build State Failure Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Restore Journal Context": {
+      "main": [
+        [
+          {
+            "node": "Notifications Enabled?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save Journal Failure State": {
+      "main": [
+        [
+          {
+            "node": "Restore Journal Failure Context",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build State Failure Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Restore Journal Failure Context": {
+      "main": [
+        [
+          {
+            "node": "Notifications Enabled?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Telegram Already Done?": {
+      "main": [
+        [
+          {
+            "node": "Restore Notification Result",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Notification Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Restore Notification Result": {
+      "main": [
+        [
+          {
+            "node": "Build Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save Final State": {
+      "main": [
+        [
+          {
+            "node": "Restore Final Response",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build State Failure Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Restore Final Response": {
+      "main": [
+        [
+          {
+            "node": "Respond Lead Intake",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Schedule Trigger": {
+      "main": [
+        [
+          {
+            "node": "Select Due Operations",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Select Due Operations": {
+      "main": [
+        [
+          {
+            "node": "Recovery Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate HubSpot Search HTTP": {
+      "main": [
+        [
+          {
+            "node": "Resolve HubSpot Match",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build CRM Failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate HubSpot Create HTTP": {
+      "main": [
+        [
+          {
+            "node": "Normalize HubSpot Result",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build CRM Failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate HubSpot Update HTTP": {
+      "main": [
+        [
+          {
+            "node": "Normalize HubSpot Result",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build CRM Failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save Notification State": {
+      "main": [
+        [
+          {
+            "node": "Restore Notification Context",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build State Failure Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Restore Notification Context": {
+      "main": [
+        [
+          {
+            "node": "Build Response",
             "type": "main",
             "index": 0
           }

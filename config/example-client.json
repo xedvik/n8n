@@ -99,5 +99,16 @@
         "executionId": "Execution ID"
       }
     }
+  },
+  "idempotency": {
+    "enabled": true,
+    "retentionDays": 30,
+    "withoutKeyPolicy": "process_new"
+  },
+  "retry": {
+    "maxAttempts": 5,
+    "baseDelaySeconds": 30,
+    "maxDelaySeconds": 3600,
+    "processingTimeoutSeconds": 300
   }
 }

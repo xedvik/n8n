@@ -100,9 +100,9 @@ status = body.get("status")
 if status in ("created", "updated"):
     assert body["notified"] is True, body
     print(f"PASS: auth -> 403; invalid -> 400; valid -> {http_status} {status} (CRM + Telegram configured)")
-elif status in ("saved_with_notification_error", "updated_with_notification_error"):
+elif status == "needs_reconciliation" or status in ("saved_with_notification_error", "updated_with_notification_error"):
     assert body["notified"] is False, body
-    print(f"PASS: auth -> 403; invalid -> 400; valid -> {http_status} {status} (lead saved, Telegram failed)")
+    print(f"PASS: auth -> 403; invalid -> 400; valid -> {http_status} {status} (lead saved, reconciliation required)")
 else:
     raise AssertionError(body)
 PY

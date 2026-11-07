@@ -1,6 +1,6 @@
-# Настройка CRM Automation Kit v0.2
+# Настройка CRM Automation Kit v0.3
 
-Руководство от чистого окружения до первой обработанной заявки. Обязательные шаги отмечены, необязательные интеграции можно пропускать.
+Руководство от чистого окружения до первой обработанной заявки. Обязательные шаги отмечены, необязательные интеграции можно пропускать. v0.3 требует PostgreSQL state store; для существующего Docker volume примените миграции.
 
 ## 1. Требования
 
@@ -32,6 +32,12 @@ LEAD_CONFIG_FILE=./config/client.json
 ```bash
 docker compose up -d
 docker compose ps
+```
+
+Для **нового** PostgreSQL volume миграции из `db/migrations` применяются автоматически при инициализации. Для существующего volume выполните:
+
+```bash
+./scripts/migrate.sh
 ```
 
 Дождитесь статуса `healthy` у обоих контейнеров. UI: <http://localhost:5678>. При первом открытии создайте owner-аккаунт.
@@ -123,6 +129,11 @@ Google Sheets может быть:
 | Нода | Credential |
 |---|---|
 | `Lead Webhook` | Header Auth (`X-Webhook-Secret` = `LEAD_WEBHOOK_SECRET`) |
+| `Reserve Operation` | PostgreSQL credential `leadOperationsPg` («CRM Automation Kit DB») |
+| `Save CRM State`, `Save CRM Failure State` | тот же PostgreSQL credential |
+| `Save Journal State`, `Save Journal Failure State`, `Save Notification State`, `Save Final State` | тот же PostgreSQL credential |
+| `Select Due Operations` | тот же PostgreSQL credential |
+| `Recovery Request` | тот же Header Auth, что у `Lead Webhook` |
 | `CRM Adapter - Google Sheets` | Google Sheets OAuth2 или Service Account |
 | `Journal Adapter - Google Sheets` | Google Sheets OAuth2 или Service Account |
 | `Error Log Adapter - Google Sheets` | Google Sheets OAuth2 или Service Account |
@@ -131,7 +142,9 @@ Google Sheets может быть:
 | `HubSpot Create Contact` | HubSpot Service Key |
 | `HubSpot Update Contact` | HubSpot Service Key |
 
-Не назначайте credential неиспользуемым интеграциям без необходимости. `doctor.sh` проверяет только включённые в конфиге интеграции.
+PostgreSQL credential создаётся в n8n как **Postgres** с теми же host/database/user/password, что в `.env` (host `postgres`, database/user из `POSTGRES_*`). Он нужен всем state/recovery-нодам, а не только CRM. `doctor.sh` проверяет его назначение отдельно.
+
+Не назначайте credential неиспользуемым интеграциям без необходимости. `doctor.sh` проверяет только включённые в конфиге интеграции, плюс обязательный PostgreSQL state store.
 
 ### Header Auth
 
@@ -150,7 +163,7 @@ Google Sheets может быть:
 ./scripts/import-workflow.sh
 ```
 
-Скрипт импортирует `workflows/lead-intake.json`, публикует workflow и перезапускает n8n. После перезапуска назначьте credentials: импорт не содержит секретов.
+Скрипт применяет миграции, импортирует `workflows/lead-intake.json`, публикует workflow и перезапускает n8n. После перезапуска назначьте credentials: импорт не содержит секретов.
 
 Для уже настроенного клиента используйте n8n UI. Скрипт импорта откажется перезаписывать существующий workflow без `ALLOW_REIMPORT=1`, потому что credential-free импорт может стереть назначенные credentials.
 
@@ -182,20 +195,25 @@ curl -i -X POST http://localhost:5678/webhook/lead-intake \
 Ожидаемые статусы:
 
 - `201` — создан контакт/строка CRM;
-- `200` — обновлён существующий HubSpot contact;
-- `202` — CRM пропущен по политике (например, phone-only при `skip`), но заявка принята;
+- `200` — обновлён существующий HubSpot contact или повтор завершённой операции (`replayed:true`);
+- `202 crm_skipped` — CRM пропущен по политике (например, phone-only при `skip`);
+- `202 in_progress` — такая же операция уже выполняется;
+- `202 retry_scheduled` — CRM/Journal retry запланирован; смотрите `retryAt`;
+- `202 needs_reconciliation` — часть действий подтверждена, но есть неоднозначная стадия;
+- `409 idempotency_conflict` — тот же ключ использован с другими данными;
 - `400` — validation error;
 - `403` — неверный/отсутствующий Header Auth;
 - `500` — ошибка конфигурации;
-- `502` — CRM не сохранил заявку;
-- `429` — HubSpot rate limit после retries.
+- `502` — CRM окончательно не сохранил заявку;
+- `503 state_store_failed` — не удалось записать состояние; успех не подтверждён.
 
 Проверьте, что:
 
 - строка появилась в CRM/журнале;
 - Telegram-сообщение пришло (если включён);
 - в случае ошибки в n8n `Executions` есть запись со статусом `error`;
-- error log содержит ошибку, если он включён.
+- error log содержит ошибку, если он включён;
+- в `app.lead_operations` операция имеет ожидаемый `status` и стадии CRM/Journal/Telegram.
 
 ## 10. Диагностика
 
@@ -237,5 +255,41 @@ curl -i -X POST http://localhost:5678/webhook/lead-intake \
 - `journal` — независимый журнал (Google Sheets), включается отдельно.
 - `notifications` — каналы и Telegram.
 - `errors` — error log (Google Sheets), включается отдельно.
+- `idempotency` — `enabled`, `retentionDays`, `withoutKeyPolicy` (`process_new`).
+- `retry` — `maxAttempts`, `baseDelaySeconds`, `maxDelaySeconds`, `processingTimeoutSeconds`.
 
 Legacy v1-конфиг без `version` автоматически нормализуется в Google Sheets-only режим: `crm.provider=google_sheets`, `journal.enabled=false`, Telegram/error log включены. Это сохраняет обратную совместимость с v0.1.
+
+## 13. Идемпотентность и recovery
+
+Ключ идемпотентности выбирается так:
+
+1. `external_id` из заявки (если задан);
+2. иначе заголовок `Idempotency-Key`;
+3. если ключа нет — создаётся новая операция (`withoutKeyPolicy=process_new`).
+
+Повтор с тем же ключом и теми же значимыми данными возвращает сохранённый результат. Другие данные → `409`. Конкурентный запрос → `202 in_progress`.
+
+Состояние операции и стадий хранится в `app.lead_operations`. Подтверждённые CRM/Journal/Telegram-стадии не выполняются повторно. При 429/5xx/timeout CRM или Journal операция получает `retry_scheduled`; Schedule Trigger раз в минуту отправляет recovery-запрос. Неоднозначные результаты (например, Telegram) получают `needs_reconciliation` и не переотправляются автоматически.
+
+Ручные команды:
+
+```bash
+./scripts/retry-operation.sh <operation-id>
+./scripts/retry-operation.sh <operation-id> --reset-attempts
+./scripts/cleanup-operations.sh --dry-run
+./scripts/cleanup-operations.sh
+```
+
+`retry-operation.sh` отказывается работать с `completed` и активной `processing` операцией. `cleanup-operations.sh` удаляет только `completed`/`failed` старше `idempotency.retentionDays`.
+
+## 14. PostgreSQL state credential
+
+Кроме стандартных интеграций, workflow использует PostgreSQL:
+
+- host: `postgres`;
+- database/user/password: значения `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD` из `.env`;
+- credential type: **Postgres**;
+- назначить нодам `Reserve Operation`, `Save * State`, `Select Due Operations`.
+
+Без этого credential новые заявки завершатся `503 state_store_failed`; ложного `201` не будет.

@@ -302,16 +302,19 @@ test('builds correct HTTP/response semantics for CRM, journal and notification s
 
   const telegramFailed = build(
     { provider: 'hubspot', status: 'created', httpStatus: 201 },
-    { notifications: { enabled: true, status: 'failed', channels: ['telegram'] }, warnings: ['notification_send_failed'], hasWarning: true },
+    { notifications: { enabled: true, status: 'failed', channels: ['telegram'] }, warnings: ['notification_send_failed'], hasWarning: true, needsReconciliation: true },
   );
-  assert.equal(telegramFailed.response.status, 'saved_with_notification_error');
+  assert.equal(telegramFailed.httpStatus, 202);
+  assert.equal(telegramFailed.response.status, 'needs_reconciliation');
   assert.equal(telegramFailed.response.notified, false);
   assert.equal(telegramFailed.hasWarning, true);
 
   const journalFailed = build(
     { provider: 'hubspot', status: 'created', httpStatus: 201 },
-    { journal: { enabled: true, status: 'failed' }, warnings: ['journal_write_failed'], hasWarning: true },
+    { journal: { enabled: true, status: 'failed' }, warnings: ['journal_write_failed'], hasWarning: true, needsReconciliation: true },
   );
+  assert.equal(journalFailed.httpStatus, 202);
+  assert.equal(journalFailed.response.status, 'needs_reconciliation');
   assert.equal(journalFailed.response.warnings.includes('journal_write_failed'), true);
   assert.equal(journalFailed.hasWarning, true);
 });
@@ -341,11 +344,14 @@ test('maps HubSpot rate limit errors to HTTP 429', () => {
     nodes: {
       'Validate Client Config': { config },
       'Validate Lead': validated,
+      'Decide Operation': { operation: { id: 'op-rate-limit', attempts: 1 } },
     },
   })[0].json;
-  assert.equal(result.httpStatus, 429);
+  assert.equal(result.httpStatus, 202);
   assert.equal(result.response.error, 'crm_rate_limited');
+  assert.equal(result.response.status, 'retry_scheduled');
   assert.equal(result.response.ok, false);
+  assert.match(result.response.retryAt, /Z$/);
 });
 
 test('phone-only HubSpot skip produces 202 context', () => {
@@ -366,8 +372,11 @@ test('workflow requires Header Auth and contains no credentials or secret-like f
     assert.equal(node.credentials, undefined, `Node "${node.name}" must not contain credentials`);
   }
   const sheetsNodes = workflow.nodes.filter((node) => node.type === 'n8n-nodes-base.googleSheets');
-  assert.equal(sheetsNodes.length, 3);
-  for (const node of sheetsNodes) assert.equal(node.parameters.options.cellFormat, 'RAW');
+  assert.equal(sheetsNodes.length, 5);
+  const writeSheetsNodes = sheetsNodes.filter((node) => !['Read CRM Leads', 'Read Journal'].includes(node.name));
+  assert.equal(writeSheetsNodes.length, 3);
+  for (const node of writeSheetsNodes) assert.equal(node.parameters.options.cellFormat, 'RAW');
+  for (const node of sheetsNodes) assert.equal(typeof node.parameters.options, 'object');
   const telegram = workflow.nodes.find((node) => node.type === 'n8n-nodes-base.telegram');
   assert.equal(telegram.parameters.additionalFields.parse_mode, 'HTML');
   assert.equal(telegram.parameters.additionalFields.appendAttribution, false);
@@ -382,4 +391,230 @@ test('HubSpot HTTP nodes use the standard Service Key credential and expected me
     assert.equal(item.credentialType, 'hubspotAppToken');
     assert.match(item.url, /api\.hubapi\.com|crm\.hubspot\.baseUrl/);
   }
+});
+
+test('builds idempotent operation input from external_id, header key, and recovery headers', () => {
+  const validated = validate(normalize(validLead));
+  const execute = (headers, config = validateConfig(exampleConfig), body = validLead) => {
+    const current = body === validLead ? validated : validate(normalize(body, config));
+    return runCode('Build Operation', {
+      input: {},
+      nodes: {
+        'Validate Lead': { ...current, config },
+        'Lead Webhook': { headers, body },
+      },
+    })[0].json.operationInput;
+  };
+
+  const external = execute({});
+  assert.equal(external.idempotencyKey, validated.lead.externalId);
+  assert.equal(external.operationId, null);
+  assert.equal(external.recovery, false);
+  assert.equal(JSON.parse(external.fingerprint).externalId, validated.lead.externalId);
+
+  const withoutExternalId = clone(validLead);
+  delete withoutExternalId.external_id;
+  const header = execute({ 'idempotency-key': ' header-key-1 ' }, validateConfig(exampleConfig), withoutExternalId);
+  assert.equal(header.idempotencyKey, 'header-key-1');
+
+  const disabled = clone(exampleConfig);
+  disabled.idempotency.enabled = false;
+  assert.equal(execute({}, validateConfig(disabled)).idempotencyKey, null);
+
+  const recovery = execute({ 'x-recovery': '1', 'x-operation-id': 'op-123' });
+  assert.equal(recovery.recovery, true);
+  assert.equal(recovery.operationId, 'op-123');
+});
+
+test('maps reserve outcomes to operation decisions', () => {
+  const decide = (outcome) => runCode('Decide Operation', {
+    input: { result: { outcome, operation: outcome === 'not_found' ? null : { id: 'op-1', status: outcome } } },
+    nodes: { 'Build Operation': { operationInput: {}, lead: {}, meta: {}, config: {} } },
+  })[0].json;
+
+  assert.equal(decide('new').decision, 'process');
+  assert.equal(decide('claimed').decision, 'process');
+  assert.equal(decide('replay').decision, 'replay');
+  assert.equal(decide('conflict').decision, 'conflict');
+  assert.equal(decide('in_progress').decision, 'in_progress');
+  assert.equal(decide('max_attempts').decision, 'terminal');
+  assert.equal(decide('current').decision, 'terminal');
+  assert.equal(decide('not_found').decision, 'not_found');
+});
+
+test('schedules retryable CRM failures and preserves Retry-After', () => {
+  const validated = validate(normalize(validLead));
+  const config = validateConfig(exampleConfig);
+  const failure = (error, attempts = 1) => runCode('Build CRM Failure', {
+    input: { error },
+    nodes: {
+      'Validate Client Config': { config },
+      'Validate Lead': validated,
+      'Decide Operation': { operation: { id: 'op-crm', attempts } },
+    },
+  })[0].json;
+
+  const limited = failure('HubSpot create HTTP 429 Retry-After: 2: too many requests');
+  assert.equal(limited.httpStatus, 202);
+  assert.equal(limited.stateUpdate.status, 'retry_scheduled');
+  assert.equal(limited.response.error, 'crm_rate_limited');
+  assert.match(limited.response.retryAt, /Z$/);
+
+  const permanent = failure('HubSpot create HTTP 400: invalid property');
+  assert.equal(permanent.httpStatus, 502);
+  assert.equal(permanent.stateUpdate.status, 'failed');
+  assert.equal(permanent.response.error, 'crm_write_failed');
+
+  const exhausted = failure('HubSpot create HTTP 500: server error', 5);
+  assert.equal(exhausted.httpStatus, 502);
+  assert.equal(exhausted.stateUpdate.status, 'failed');
+});
+
+test('distinguishes retryable journal failures from ambiguous failures', () => {
+  const context = contextFor({ provider: 'hubspot', status: 'created', httpStatus: 201 });
+  context.operation = { id: 'op-journal', attempts: 1 };
+  context.warnings = [];
+  const run = (error) => runCode('Build Journal Warning', {
+    input: { error },
+    nodes: { 'Build Journal Context': context },
+  })[0].json;
+
+  const transient = run('Google Sheets HTTP 503: backend error');
+  assert.equal(transient.retryScheduled, true);
+  assert.equal(transient.needsReconciliation, false);
+  assert.equal(transient.stateUpdate.status, 'retry_scheduled');
+
+  const permanent = run('Google Sheets HTTP 404: sheet not found');
+  assert.equal(permanent.retryScheduled, false);
+  assert.equal(permanent.needsReconciliation, true);
+  assert.equal(permanent.stateUpdate.status, 'needs_reconciliation');
+});
+
+test('builds replay, conflict, in-progress and terminal responses', () => {
+  const response = (ctx) => runCode('Build Replay Response', {
+    input: {},
+    nodes: { 'Decide Operation': ctx },
+  })[0].json;
+
+  const replay = response({ decision: 'replay', operation: { id: 'op-1', response: { status: 'created', ok: true } } });
+  assert.equal(replay.httpStatus, 200);
+  assert.equal(replay.response.replayed, true);
+  assert.equal(replay.response.operationId, 'op-1');
+
+  assert.equal(response({ decision: 'conflict', operation: { id: 'op-1' } }).httpStatus, 409);
+  assert.equal(response({ decision: 'in_progress', operation: { id: 'op-1', status: 'processing' } }).httpStatus, 202);
+  assert.equal(response({ decision: 'not_found', operation: null }).httpStatus, 404);
+  const current = response({ decision: 'terminal', operation: { id: 'op-1', status: 'failed' } });
+  assert.equal(current.httpStatus, 200);
+  assert.equal(current.response.ok, false);
+});
+
+test('validates HubSpot full HTTP responses and extracts Retry-After', () => {
+  const ok = runCode('Validate HubSpot Search HTTP', {
+    input: { statusCode: 200, body: { results: [{ id: '1' }] }, headers: {} },
+  })[0].json;
+  assert.deepEqual(ok, { results: [{ id: '1' }] });
+
+  assert.throws(() => runCode('Validate HubSpot Create HTTP', {
+    input: { statusCode: 429, body: { message: 'slow down' }, headers: { 'retry-after': '2' } },
+  }), /HTTP 429 Retry-After: 2/);
+});
+
+test('marks Telegram failures as needs_reconciliation without claiming success', () => {
+  const context = contextFor({ provider: 'hubspot', status: 'created', httpStatus: 201 });
+  context.config.notifications.enabled = true;
+  context.config.notifications.channels = ['telegram'];
+  const warning = runCode('Build Notification Warning', {
+    input: { error: 'Bad Request: chat not found' },
+    nodes: { 'Build Notification Message': context },
+  })[0].json;
+  assert.equal(warning.notifications.status, 'failed');
+  assert.equal(warning.needsReconciliation, true);
+  assert.equal(warning.hasWarning, true);
+});
+
+test('validates idempotency and retry config defaults and bounds', () => {
+  const defaults = validateConfig(exampleConfig);
+  assert.equal(defaults.idempotency.enabled, true);
+  assert.equal(defaults.idempotency.withoutKeyPolicy, 'process_new');
+  assert.equal(defaults.retry.maxAttempts, 5);
+  assert.equal(defaults.retry.processingTimeoutSeconds, 300);
+
+  const invalid = clone(exampleConfig);
+  invalid.retry.maxAttempts = 0;
+  assert.throws(() => validateConfig(invalid), /retry\.maxAttempts/);
+  const invalidRetention = clone(exampleConfig);
+  invalidRetention.idempotency.retentionDays = 0;
+  assert.throws(() => validateConfig(invalidRetention), /idempotency\.retentionDays/);
+});
+
+test('workflow contains v0.3 state, recovery, and full-response wiring', () => {
+  const names = new Set(workflow.nodes.map((node) => node.name));
+  for (const name of ['Build Operation', 'Reserve Operation', 'Decide Operation', 'Schedule Trigger', 'Select Due Operations', 'Recovery Request', 'Save Final State']) {
+    assert.ok(names.has(name), `missing ${name}`);
+  }
+  const reserve = workflow.nodes.find((node) => node.name === 'Reserve Operation');
+  assert.match(reserve.parameters.query, /app\.reserve_lead_operation\(/);
+  assert.match(reserve.parameters.query, /\$9::uuid/);
+  const recovery = workflow.nodes.find((node) => node.name === 'Recovery Request');
+  const headers = recovery.parameters.headerParameters.parameters.map((item) => item.name);
+  assert.deepEqual(headers.sort(), ['Idempotency-Key', 'X-Operation-Id', 'X-Recovery'].sort());
+  for (const name of ['HubSpot Search Contact', 'HubSpot Create Contact', 'HubSpot Update Contact']) {
+    const node = workflow.nodes.find((item) => item.name === name);
+    assert.equal(node.parameters.options.response.response.fullResponse, true);
+    assert.equal(node.parameters.options.response.response.neverError, true);
+  }
+});
+
+test('reconciles existing Google Sheets CRM and Journal rows by external id or operation id', () => {
+  const validated = validate(normalize(validLead));
+  const config = validateConfig(exampleConfig);
+  const operation = { id: 'op-reconcile-1' };
+  const crmCtx = { lead: validated.lead, meta: validated.meta, config, operation };
+  const checkCrm = (row) => runCode('Check Existing CRM Row', {
+    input: row,
+    nodes: { 'Decide Operation': crmCtx },
+  })[0].json;
+  assert.equal(checkCrm({ 'External ID': validated.lead.externalId }).existingCrm, true);
+  assert.equal(checkCrm({ 'Request ID': operation.id }).existingCrm, true);
+  assert.equal(checkCrm({ 'External ID': 'other', 'Request ID': 'other' }).existingCrm, false);
+
+  const journalCtx = { ...crmCtx, journal: { enabled: true, status: 'disabled' } };
+  const checkJournal = (row) => runCode('Check Existing Journal Row', {
+    input: row,
+    nodes: { 'Build Journal Context': journalCtx },
+  })[0].json;
+  assert.equal(checkJournal({ 'External ID': validated.lead.externalId }).existingJournal, true);
+  assert.equal(checkJournal({ 'Request ID': operation.id }).existingJournal, true);
+  assert.equal(checkJournal({ 'External ID': 'other', 'Request ID': 'other' }).existingJournal, false);
+
+  const mapped = runCode('Map CRM Sheet Row', {
+    input: {},
+    nodes: {
+      'Decide Operation': crmCtx,
+      'Validate Lead': validated,
+      'Validate Client Config': { config },
+    },
+  })[0].json;
+  assert.equal(mapped['Request ID'], operation.id);
+  assert.equal(mapped['External ID'], validated.lead.externalId);
+});
+
+test('persists sent Telegram state before final response assembly', () => {
+  const context = contextFor({ provider: 'hubspot', status: 'created', httpStatus: 201 });
+  context.config.notifications.enabled = true;
+  context.config.notifications.channels = ['telegram'];
+  context.operation = { id: 'op-notify', attempts: 1 };
+  const built = runCode('Build Notifications Sent', {
+    input: {},
+    nodes: {
+      'Build Notification Message': context,
+      'Notification Adapter - Telegram': { result: { message_id: 777 } },
+    },
+  })[0].json;
+  assert.equal(built.notifications.status, 'sent');
+  assert.equal(built.stateUpdate.status, 'processing');
+  assert.equal(built.stateUpdate.telegram_status, 'sent');
+  assert.equal(built.stateUpdate.telegram_message_id, '777');
+  assert.equal(built.operation.id, 'op-notify');
 });

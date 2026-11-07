@@ -1,6 +1,6 @@
 # Google Sheets
 
-Google Sheets в v0.2 может выполнять три независимые роли:
+Google Sheets в v0.3 может выполнять три независимые роли:
 
 1. **CRM-хранилище** — `crm.provider=google_sheets` (режим обратной совместимости v0.1).
 2. **Журнал** — `journal.enabled=true`; пишет все принятые заявки независимо от CRM.
@@ -217,4 +217,4 @@ curl -i -X POST http://localhost:5678/webhook/lead-intake \
   - исчерпана квота Google API.
 - `The requested webhook ... is not registered` — workflow не активен, см. troubleshooting.
 - Ошибка записи журнала не отменяет успешный CRM: ответ будет с `journal.status=failed`, `warnings` и execution `error`.
-- Ошибка Telegram не стирает строку: ответ `saved_with_notification_error` с `notified:false`.
+- Ошибка Telegram не стирает строку: ответ `202 needs_reconciliation` с `notified:false`; автоматической переотправки нет.

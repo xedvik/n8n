@@ -1,6 +1,6 @@
 # HubSpot
 
-HubSpot-адаптер в v0.2 использует стандартный n8n credential **HubSpot Service Key** (`hubspotAppToken`) и три HTTP Request-ноды:
+HubSpot-адаптер в v0.3 использует стандартный n8n credential **HubSpot Service Key** (`hubspotAppToken`) и три HTTP Request-ноды:
 
 - `HubSpot Search Contact` — поиск по email;
 - `HubSpot Create Contact` — создание нового контакта;
@@ -22,7 +22,7 @@ HubSpot-адаптер в v0.2 использует стандартный n8n c
 2. Вставьте access token.
 3. Сохраните.
 
-Альтернатива — `HubSpot OAuth2 API`: она поддерживается n8n, но требует OAuth app и набора scopes. В v0.2 HTTP-ноды по умолчанию настроены на `hubspotAppToken`. Если вы сознательно используете OAuth2, переключите **Credential Type** на `HubSpot OAuth2 API` во всех трёх HubSpot HTTP-нодах и назначьте OAuth2 credential. Иначе HubSpot-ветка будет падать с ошибкой credential.
+Альтернатива — `HubSpot OAuth2 API`: она поддерживается n8n, но требует OAuth app и набора scopes. В v0.3 HTTP-ноды по умолчанию настроены на `hubspotAppToken`. Если вы сознательно используете OAuth2, переключите **Credential Type** на `HubSpot OAuth2 API` во всех трёх HubSpot HTTP-нодах и назначьте OAuth2 credential. Иначе HubSpot-ветка будет падать с ошибкой credential.
 
 ## 3. Назначение credential
 
@@ -79,13 +79,13 @@ HubSpot-адаптер в v0.2 использует стандартный n8n c
 
 ### Заявка только с телефоном
 
-- `phoneOnlyPolicy=skip` — единственная поддерживаемая политика v0.2. Заявка без email не создаёт контакт и не ищет телефонные совпадения вслепую; журнал/уведомления могут продолжить работу. Поиск/создание по телефону требует отдельной проверенной стратегии нормализации и появится в следующей версии.
+- `phoneOnlyPolicy=skip` — единственная поддерживаемая политика v0.3. Заявка без email не создаёт контакт и не ищет телефонные совпадения вслепую; журнал/уведомления могут продолжить работу. Поиск/создание по телефону требует отдельной проверенной стратегии нормализации и появится в следующей версии.
 
 ### Ошибки и лимиты
 
-- HTTP-ноды имеют `retryOnFail`: 3 попытки с паузой 5 секунд.
-- При 429/rate limit после retries ответ клиенту — `429 crm_rate_limited`, execution `error`.
-- Прочие ошибки API → `502 crm_write_failed`; детали сохраняются в execution и error log.
+- HTTP-ноды используют full-response handling и передают статус/headers в state machine.
+- При 429/5xx/timeout CRM-операция получает `202 retry_scheduled`; `Retry-After` учитывается, если присутствует. После `retry.maxAttempts` — окончательная ошибка.
+- Прочие окончательные ошибки API → `502 crm_write_failed`; детали сохраняются в execution и error log.
 - Ошибка HubSpot не запускает journal/notifications: CRM считается основным хранилищем.
 
 ## 6. Проверка
@@ -108,7 +108,7 @@ HubSpot-адаптер в v0.2 использует стандартный n8n c
 - `200 updated` при повторной заявке с тем же email;
 - `202 crm_skipped` для phone-only при `skip`;
 - `502` при отсутствии credential/scope;
-- `429` при исчерпании лимита.
+- `202 retry_scheduled` при 429/5xx (не финальный успех); после `retry.maxAttempts` — `502`.
 
 Тестовая заявка создаёт реальный контакт. Для проверки phone-only используйте HTTP-запрос без email.
 
@@ -116,7 +116,7 @@ HubSpot-адаптер в v0.2 использует стандартный n8n c
 
 - `401/403` — неверный Service Key или отсутствуют scopes контактов.
 - `400 Property ... does not exist` — в `propertyMapping` указано несуществующее custom property.
-- `400` при phone-only create — в v0.2 такой сценарий не выполняется: phone-only заявки пропускаются с `202 crm_skipped`.
+- `400` при phone-only create — в v0.3 такой сценарий не выполняется: phone-only заявки пропускаются с `202 crm_skipped`.
 - `429` — rate limit; уменьшите частоту запросов, проверьте execution и повторите позже.
 - `502` — credential не назначен одной из трёх HubSpot-нод, неверный base URL или network/API error.
 - Контакт обновился не тот — проверьте `searchEmailProperty`/`propertyMapping.email` и дубликаты email в HubSpot.

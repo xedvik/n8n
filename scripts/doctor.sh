@@ -16,6 +16,8 @@ CONFIG_FILE="${LEAD_CONFIG_FILE:-./config/client.json}"
 CONFIG_FILE="${CONFIG_FILE#./}"
 WEBHOOK_HEADER_NAME="${LEAD_WEBHOOK_HEADER_NAME:-X-Webhook-Secret}"
 WEBHOOK_SECRET="${LEAD_WEBHOOK_SECRET:-}"
+DB_USER="${POSTGRES_USER:-n8n}"
+DB_NAME="${POSTGRES_DB:-n8n}"
 INTEGRATION_TEST=0
 for arg in "$@"; do
   case "$arg" in
@@ -92,6 +94,33 @@ if [ -f "$CONFIG_FILE" ]; then
   fi
 fi
 
+if docker compose ps --status running --services 2>/dev/null | grep -qx postgres; then
+  schema_ok="$(docker compose exec -T postgres psql -U "$DB_USER" -d "$DB_NAME" -Atc "select (to_regclass('app.lead_operations') is not null)::text" 2>/dev/null | tr -d '\r' || true)"
+  reserve_ok="$(docker compose exec -T postgres psql -U "$DB_USER" -d "$DB_NAME" -Atc "select (to_regprocedure('app.reserve_lead_operation(text,text,text,text,jsonb,boolean,integer,integer,uuid)') is not null)::text" 2>/dev/null | tr -d '\r' || true)"
+  save_ok="$(docker compose exec -T postgres psql -U "$DB_USER" -d "$DB_NAME" -Atc "select (to_regprocedure('app.save_operation_state(uuid,jsonb)') is not null)::text" 2>/dev/null | tr -d '\r' || true)"
+  if [ "$schema_ok" = "true" ] && [ "$reserve_ok" = "true" ] && [ "$save_ok" = "true" ]; then
+    ok "PostgreSQL app schema and operation functions are installed"
+  else
+    fail "PostgreSQL app schema/functions are missing or outdated; run ./scripts/migrate.sh"
+  fi
+  if [ "$schema_ok" = "true" ]; then
+    counts="$(docker compose exec -T postgres psql -U "$DB_USER" -d "$DB_NAME" -Atc "select coalesce(status,'unknown') || '=' || count(*) from app.lead_operations group by status order by status" 2>/dev/null | tr '\r' ' ' || true)"
+    info "Lead operations: ${counts:-none}"
+    overdue="$(docker compose exec -T postgres psql -U "$DB_USER" -d "$DB_NAME" -Atc "select count(*) from app.lead_operations where (status='retry_scheduled' and next_attempt_at <= now()) or (status='processing' and updated_at < now() - interval '5 minutes')" 2>/dev/null | tr -d '\r' || true)"
+    needs="$(docker compose exec -T postgres psql -U "$DB_USER" -d "$DB_NAME" -Atc "select count(*) from app.lead_operations where status='needs_reconciliation'" 2>/dev/null | tr -d '\r' || true)"
+    if [ "${overdue:-0}" != "0" ]; then
+      warn "${overdue} operation(s) are due for recovery; check Schedule Trigger executions"
+    fi
+    if [ "${needs:-0}" != "0" ]; then
+      warn "${needs} operation(s) require reconciliation; inspect before retrying"
+    fi
+  else
+    warn "Operation status counts unavailable until migrations are applied"
+  fi
+else
+  fail "PostgreSQL is not running; operation state cannot be checked"
+fi
+
 if docker compose exec -T n8n n8n list:workflow --active=true 2>/dev/null | grep -q "${WORKFLOW_ID}"; then
   ok "Workflow ${WORKFLOW_ID} is active"
 else
@@ -129,6 +158,23 @@ def non_placeholder(value, name):
 
 if not has_credential("Lead Webhook", ["httpHeaderAuth"]):
     failures.append("Lead Webhook has no Header Auth credential")
+for node_name in (
+    "Reserve Operation",
+    "Save CRM State",
+    "Save CRM Failure State",
+    "Save Journal State",
+    "Save Journal Failure State",
+    "Save Notification State",
+    "Save Final State",
+    "Select Due Operations",
+):
+    if not has_credential(node_name, ["postgres"]):
+        failures.append(f"{node_name} has no PostgreSQL credential")
+if not has_credential("Recovery Request", ["httpHeaderAuth"]):
+    failures.append("Recovery Request has no Header Auth credential")
+for required_node in ("Build Operation", "Save Notification State", "Select Due Operations", "Recovery Request", "Schedule Trigger"):
+    if required_node not in nodes:
+        failures.append(f"required v0.3 node not found: {required_node}")
 
 provider = config.get("crm", {}).get("provider")
 if provider == "google_sheets":

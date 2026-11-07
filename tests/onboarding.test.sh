@@ -27,6 +27,9 @@ assert config["crm"]["provider"] == "google_sheets"
 assert config["crm"]["googleSheets"]["spreadsheetId"] == "sheet-onboarding-test"
 assert config["journal"]["enabled"] is False
 assert config["notifications"]["enabled"] is False
+assert config["idempotency"]["enabled"] is True
+assert config["idempotency"]["withoutKeyPolicy"] == "process_new"
+assert config["retry"]["maxAttempts"] == 5
 print("PASS: setup-client created and validated a new client config")
 PY
 
