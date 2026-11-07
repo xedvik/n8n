@@ -3,10 +3,14 @@ import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
+  ROOT,
   buildCandidateConfig,
+  createConfigBackup,
+  listConfigBackups,
   loadCurrentConfig,
   loadTemplate,
   publicConfig,
+  restoreConfigBackup,
   saveConfig,
   validateConfig,
 } from './lib/config.mjs';
@@ -26,12 +30,14 @@ import {
 } from './lib/auth.mjs';
 import {
   ensureCredential,
+  googleSheetsProvision,
   n8nCredentialsUrl,
   testIntegration,
   testStoredCredential,
 } from './lib/integrations.mjs';
 import { WORKFLOW_ID, applyWorkflowCredentials, installWorkflow } from './lib/workflow.mjs';
 import { runDoctor } from './lib/doctor.mjs';
+import { createOps } from './lib/ops.mjs';
 import {
   hostAllowed,
   isLoopback,
@@ -52,6 +58,7 @@ const ALLOW_REMOTE = process.env.WIZARD_ALLOW_REMOTE === '1';
 const SERVER_MODE = isServerMode();
 const TOKEN = makeToken();
 let api = new N8nApi({ baseUrl: defaultN8nBaseUrl() });
+const ops = createOps({ cwd: ROOT });
 const N8N_URL = api.baseUrl;
 const N8N_PUBLIC_URL = String(process.env.N8N_PUBLIC_URL || N8N_URL).replace(/\/+$/, '');
 
@@ -88,15 +95,36 @@ function credentialKind(type) {
   return undefined;
 }
 
-async function bootstrap() {
+function publicUrlFor(req) {
+  const configured = String(process.env.N8N_PUBLIC_URL || '').trim();
+  if (configured && !configured.includes('CHANGE_ME')) return configured.replace(/\/+$/, '');
+  const proto = String(req.headers['x-forwarded-proto'] || (SERVER_MODE ? 'https' : 'http')).split(',')[0].trim();
+  const host = String(req.headers['x-forwarded-host'] || req.headers.host || `127.0.0.1:${PORT}`).split(',')[0].trim();
+  return `${proto}://${host}`.replace(/\/+$/, '');
+}
+
+function setupUrls(publicUrl) {
+  return {
+    publicUrl,
+    webhookUrl: `${publicUrl}/webhook/lead-intake`,
+    webhookTestUrl: `${publicUrl}/webhook-test/lead-intake`,
+    oauthCallbackUrl: `${publicUrl}/rest/oauth2-credential/callback`,
+  };
+}
+
+async function bootstrap(req) {
   const current = await loadCurrentConfig();
   const template = await loadTemplate();
   const warnings = [];
   if (current.error) warnings.push(`Текущий конфиг невалиден: ${current.error}`);
   const reachable = await api.health();
+  const publicUrl = publicUrlFor(req);
+  const urls = setupUrls(publicUrl);
   const n8n = {
     baseUrl: N8N_URL,
-    publicUrl: N8N_PUBLIC_URL,
+    publicUrl,
+    webhookUrl: urls.webhookUrl,
+    oauthCallbackUrl: urls.oauthCallbackUrl,
     apiKeyConfigured: api.configured,
     reachable,
     workflowId: WORKFLOW_ID,
@@ -145,6 +173,13 @@ async function bootstrap() {
   return {
     ok: true,
     auth: { serverMode: SERVER_MODE },
+    setup: {
+      ...urls,
+      hasConfig: current.exists,
+      workflowActive: Boolean(n8n.workflowActive),
+      apiKeyConfigured: api.configured,
+      complete: Boolean(current.exists && api.configured && n8n.workflowExists && n8n.workflowActive),
+    },
     hasConfig: current.exists,
     config: publicConfig(current.config || template),
     template: publicConfig(template),
@@ -203,6 +238,16 @@ function mapError(error) {
     n8n_unreachable: 502,
     n8n_unauthorized: 401,
     n8n_api_error: 502,
+    invalid_backup: 400,
+    backup_not_found: 404,
+    config_not_found: 404,
+    invalid_operation_id: 400,
+    invalid_status: 400,
+    operation_not_found: 404,
+    operation_state_invalid: 409,
+    docker_unavailable: 503,
+    google_auth_error: 502,
+    google_api_error: 502,
   };
   return {
     status: known[error.code] || error.status || 500,
@@ -365,7 +410,7 @@ async function handleApi(req, res, url) {
   }
   if (!requireSession(req, res)) return true;
   if (req.method === 'GET' && url.pathname === '/api/bootstrap') {
-    sendJson(res, 200, await bootstrap());
+    sendJson(res, 200, await bootstrap(req));
     return true;
   }
   if (req.method === 'POST' && url.pathname === '/api/config/validate') {
@@ -519,6 +564,117 @@ async function handleApi(req, res, url) {
     }
     try {
       const result = await runDoctor({ integrationTest });
+      sendJson(res, 200, result);
+    } catch (error) {
+      const mapped = mapError(error);
+      sendError(res, mapped.status, mapped.code, mapped.message);
+    }
+    return true;
+  }
+  if (req.method === 'GET' && url.pathname === '/api/services') {
+    try {
+      sendJson(res, 200, await ops.health());
+    } catch (error) {
+      const mapped = mapError(error);
+      sendError(res, mapped.status, mapped.code, mapped.message);
+    }
+    return true;
+  }
+  if (req.method === 'GET' && url.pathname === '/api/operations/summary') {
+    try {
+      sendJson(res, 200, await ops.summary());
+    } catch (error) {
+      const mapped = mapError(error);
+      sendError(res, mapped.status, mapped.code, mapped.message);
+    }
+    return true;
+  }
+  if (req.method === 'GET' && url.pathname === '/api/operations') {
+    try {
+      const result = await ops.list({
+        status: url.searchParams.get('status') || undefined,
+        limit: url.searchParams.get('limit') || undefined,
+      });
+      result.operations = result.operations.map((operation) => ({
+        ...operation,
+        lastError: sanitizeText(operation.lastError),
+      }));
+      sendJson(res, 200, result);
+    } catch (error) {
+      const mapped = mapError(error);
+      sendError(res, mapped.status, mapped.code, mapped.message);
+    }
+    return true;
+  }
+  const retryMatch = url.pathname.match(/^\/api\/operations\/([^/]+)\/retry$/);
+  if (req.method === 'POST' && retryMatch) {
+    if (!requireToken(req, res)) return true;
+    const body = await readBody(req, res);
+    if (!body) return true;
+    try {
+      const result = await ops.retry(decodeURIComponent(retryMatch[1]), {
+        resetAttempts: Boolean(body.resetAttempts),
+      });
+      sendJson(res, 200, result);
+    } catch (error) {
+      const mapped = mapError(error);
+      sendError(res, mapped.status, mapped.code, mapped.message);
+    }
+    return true;
+  }
+  if (req.method === 'GET' && url.pathname === '/api/config/backups') {
+    try {
+      sendJson(res, 200, { ok: true, backups: await listConfigBackups() });
+    } catch (error) {
+      const mapped = mapError(error);
+      sendError(res, mapped.status, mapped.code, mapped.message);
+    }
+    return true;
+  }
+  if (req.method === 'POST' && url.pathname === '/api/config/backups') {
+    if (!requireToken(req, res)) return true;
+    try {
+      sendJson(res, 200, { ok: true, backup: await createConfigBackup() });
+    } catch (error) {
+      const mapped = mapError(error);
+      sendError(res, mapped.status, mapped.code, mapped.message);
+    }
+    return true;
+  }
+  if (req.method === 'POST' && url.pathname === '/api/config/restore') {
+    if (!requireToken(req, res)) return true;
+    const body = await readBody(req, res);
+    if (!body) return true;
+    if (body.confirm !== true) {
+      sendError(res, 400, 'confirmation_required', 'Восстановление конфига требует подтверждения.');
+      return true;
+    }
+    try {
+      const restored = await restoreConfigBackup(body.name);
+      sendJson(res, 200, {
+        ok: true,
+        config: publicConfig(restored.config),
+        backupCreated: restored.backupCreated,
+        backupName: restored.backupName,
+        message: 'Конфигурация восстановлена. Проверьте doctor и при необходимости примените workflow.',
+      });
+    } catch (error) {
+      const mapped = mapError(error);
+      sendError(res, mapped.status, mapped.code, mapped.message);
+    }
+    return true;
+  }
+  if (req.method === 'POST' && url.pathname === '/api/google/provision') {
+    if (!requireToken(req, res)) return true;
+    const body = await readBody(req, res);
+    if (!body) return true;
+    try {
+      const result = await googleSheetsProvision({
+        serviceAccount: body.serviceAccount,
+        spreadsheetId: body.spreadsheetId,
+        title: body.title,
+        sheets: body.sheets,
+      });
       sendJson(res, 200, result);
     } catch (error) {
       const mapped = mapError(error);

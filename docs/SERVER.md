@@ -1,29 +1,38 @@
-# Server-развёртывание на одном домене
+# Единый стек v0.5: установка и эксплуатация
 
-Этот режим публикует n8n и веб-мастер на одном HTTPS-домене через Caddy:
+v0.5 — единственный поддерживаемый способ развёртывания. Нет отдельных Local и Server режимов, нет второго Compose-файла и второго способа запуска мастера.
 
-- `https://<domain>/` — n8n UI, public API, OAuth callbacks и webhooks.
-- `https://<domain>/setup/` — веб-мастер настройки (Caddy снимает префикс `/setup`).
-- n8n слушает только `127.0.0.1:5678`; PostgreSQL портов наружу не публикует.
-- Caddy работает в `network_mode: host`, завершает TLS и проксирует loopback-порты.
+Один `docker-compose.yml` запускает:
 
-Локальный режим (`docker compose up -d` + `./scripts/start-wizard.sh`) не меняется.
+- `caddy` — единственный публичный контейнер, HTTPS `80/443`;
+- `n8n` — внутренний сервис, без публикации порта;
+- `postgres` — внутренний сервис, без публикации порта;
+- `wizard` — внутренний сервис, доступный только через Caddy по `/setup/`.
+
+Маршруты:
+
+```text
+https://<domain>/                         -> n8n
+https://<domain>/webhook/lead-intake      -> n8n
+https://<domain>/rest/oauth2-credential/callback -> n8n
+https://<domain>/api/v1/*                 -> n8n public API
+https://<domain>/setup/                   -> wizard
+```
 
 ## Требования
 
-- Linux VPS или выделенный сервер с systemd и Docker Compose.
-- Docker с поддержкой `network_mode: host` (обычный rootful Docker на Linux;
-  Docker Desktop/rootless может не подойти).
-- Домен, A/AAAA-запись которого указывает на этот сервер.
-- Открытые входящие TCP-порты `80` и `443`.
-- Node.js 22+ на хосте для веб-мастера (установщик проверяет версию).
-- `openssl`, `curl`, `ss` (пакет iproute2) — обычно уже установлены.
+- Linux-сервер с Docker Engine и Docker Compose plugin.
+- A/AAAA-запись домена указывает на сервер.
+- Открыты входящие TCP `80` и `443`.
+- `openssl`, `curl`, `ss` (обычно уже установлены).
+- Node.js и отдельный процесс мастера на хосте **не требуются** для эксплуатации.
+- Docker socket нужен контейнеру Wizard для существующих doctor/import/recovery скриптов; установщик подключает его в Compose.
 
 Проверка:
 
 ```bash
 docker compose version
-node --version
+docker info
 ```
 
 ## Установка
@@ -36,21 +45,16 @@ sudo ./scripts/install-server.sh crm.example.com admin@example.com
 
 Установщик идемпотентен. Он:
 
-1. Проверяет домен, email, Docker/Compose, Node.js 22+ и свободность портов
-   80/443, а также loopback-портов 5678/8787 (предупреждение).
-2. Создаёт `.env` из `.env.example`, если файла нет, и выставляет `chmod 600`.
-3. Генерирует `POSTGRES_PASSWORD`, `N8N_ENCRYPTION_KEY`, `LEAD_WEBHOOK_SECRET` и
-   `WIZARD_SECRET_KEY`, только если они отсутствуют, пусты или содержат `CHANGE_ME`.
-4. Прописывает серверные значения `N8N_*`, `CRM_DOMAIN`, `ACME_EMAIL`, `WIZARD_*`,
-   `N8N_API_URL`, `N8N_PUBLIC_URL`, `LEAD_CONFIG_FILE`.
-5. Создаёт `wizard-data/` с режимом `700` и одноразовый `bootstrap-token` (`600`),
-   если ещё нет `auth.json`; существующие данные и токен не перезаписываются.
-6. Устанавливает и запускает systemd-юнит `crm-wizard.service`.
-7. Поднимает `docker compose -f docker-compose.yml -f docker-compose.server.yml up -d`,
-   ждёт готовности n8n, применяет миграции и импортирует workflow, только если его ещё нет.
-8. Печатает первые шаги и точный first-run URL, пока `auth.json` ещё не создан.
+1. Проверяет домен, email, Docker/Compose и занятость портов `80/443`.
+2. Создаёт `.env` из `.env.example` и выставляет `chmod 600`.
+3. Генерирует `POSTGRES_PASSWORD`, `N8N_ENCRYPTION_KEY`, `LEAD_WEBHOOK_SECRET`, `WIZARD_SECRET_KEY` только если они пусты или placeholder.
+4. Прописывает единые публичные URL, `CRM_DOMAIN`, `ACME_EMAIL`, `WIZARD_*`, `N8N_API_URL=http://n8n:5678`, `N8N_PUBLIC_URL=https://<domain>/`.
+5. Создаёт `wizard-data/` и одноразовый `bootstrap-token`, если ещё нет `auth.json`.
+6. Собирает и запускает **единый** стек: `docker compose up -d --build`.
+7. Ждёт готовности n8n и Wizard, применяет миграции и импортирует workflow, только если его ещё нет.
+8. Печатает first-run URL.
 
-Повторный запуск сохраняет секреты, базу, конфиг клиента и не перегенерирует токен.
+Повторный запуск сохраняет `.env`, базу, конфиг клиента, credentials, workflow и токен.
 
 ## Первый запуск
 
@@ -62,85 +66,33 @@ sudo ./scripts/install-server.sh crm.example.com admin@example.com
    - `credential:list`
    - `credential:read`
    - `credential:create`
-3. Откройте first-run URL из вывода установщика:
-   `https://<domain>/setup/?token=<одноразовый-токен>`.
-   Зарегистрируйте администратора мастера и подключите n8n API key.
-   После успешной регистрации токен автоматически удаляется и повторная регистрация
-   блокируется; вручную удалять файл не нужно.
-4. При повторном запуске установщик, если `auth.json` уже существует, печатает
-   только `https://<domain>/setup/`.
+3. Откройте `https://<domain>/setup/?token=<token>` из вывода установщика.
+4. Зарегистрируйте единственного администратора.
+5. Подключите n8n API key в мастере.
+6. Пройдите мастер до тестовой заявки.
 
-Для OAuth2 credentials (Google, HubSpot) нажмите Connect в n8n:
-`https://<domain>/home/credentials`.
+Bootstrap-токен удаляется после успешной регистрации. Повторная регистрация закрыта. При повторном запуске установщика с существующим `auth.json` печатается только `https://<domain>/setup/`.
 
 ## DNS и TLS
 
-- A-запись (и AAAA, если используется IPv6) домена должна указывать на сервер.
-- Caddy сам получает и продлевает сертификат Let's Encrypt по HTTP-01/TLS-ALPN-01.
-- `ACME_EMAIL` из `.env` используется для регистрации в ACME.
-- Порты 80 и 443 должны быть доступны из интернета. Если 80 закрыт или занят,
-  выпуск сертификата не завершится.
-- После изменения DNS подождите распространения записей; проверьте:
-  `dig +short <domain>`.
-- Сертификаты и ACME-состояние хранятся в volume `caddy_data`; не удаляйте его без причины.
-- Admin API Caddy не публикуется наружу (по умолчанию только loopback).
+- A/AAAA-запись должна указывать на сервер.
+- Caddy автоматически получает и продлевает сертификат Let's Encrypt.
+- `ACME_EMAIL` используется для ACME.
+- Порты `80` и `443` должны быть доступны из интернета.
+- Сертификаты и ACME-состояние хранятся в volumes `caddy_data` и `caddy_config`; не удаляйте их без причины.
+- Caddy admin API отключён (`admin off`).
 
-## Локальный режим и сервер
+Для локальной проверки можно использовать `CRM_DOMAIN=localhost`; Caddy выпустит локальный сертификат, браузер может потребовать доверия локальному CA. Это тот же стек, а не отдельный режим.
 
-| | Локально | Сервер |
-|---|---|---|
-| n8n UI | `http://127.0.0.1:5678` | `https://<domain>/` |
-| Мастер | `http://127.0.0.1:8787` | `https://<domain>/setup/` |
-| TLS | нет | Caddy + автоматический ACME |
-| Compose | `docker-compose.yml` | `docker-compose.yml` + `docker-compose.server.yml` |
-| Мастер | `./scripts/start-wizard.sh` | systemd `crm-wizard.service` |
-| n8n bind | `127.0.0.1` | `127.0.0.1` |
+## Внутренние порты и firewall
 
-Серверные переменные в `.env`: `CRM_DOMAIN`, `ACME_EMAIL`, `N8N_HOST=<domain>`,
-`N8N_PROTOCOL=https`, `N8N_WEBHOOK_URL=https://<domain>/`,
-`N8N_EDITOR_BASE_URL=https://<domain>/`, `N8N_BIND_ADDRESS=127.0.0.1`,
-`WIZARD_SERVER_MODE=1`, `WIZARD_ALLOWED_HOSTS=<domain>`,
-`WIZARD_COOKIE_SECURE=1`.
+Публикуйте только:
 
-## OAuth callback URL
+- `80/tcp` — ACME и redirect;
+- `443/tcp` — HTTPS;
+- SSH по вашей политике.
 
-n8n формирует callback из `N8N_EDITOR_BASE_URL` и `N8N_PROTOCOL`. Для этого развёртывания:
-
-```text
-https://<domain>/rest/oauth2-credential/callback
-```
-
-Укажите этот URL в настройках OAuth-приложения Google/HubSpot, если требуется
-ручная регистрация. `N8N_PROXY_HOPS=1` обеспечивает корректное определение схемы
-`https` за Caddy.
-
-## Webhook URL
-
-Production webhook:
-
-```text
-https://<domain>/webhook/lead-intake
-```
-
-Test webhook:
-
-```text
-https://<domain>/webhook-test/lead-intake
-```
-
-`N8N_WEBHOOK_URL=https://<domain>/` используется n8n для построения публичных ссылок.
-Header Auth (`X-Webhook-Secret`) остаётся обязательным; HTTPS не заменяет секрет.
-
-## Firewall
-
-Открывайте только:
-
-- `80/tcp` — ACME HTTP-01 и редирект на HTTPS.
-- `443/tcp` — HTTPS.
-- SSH-порт по вашей политике.
-
-Не публикуйте наружу `5678` (n8n), `8787` (мастер) и `5432` (PostgreSQL).
-Docker Compose публикует n8n только на `127.0.0.1`; PostgreSQL не имеет `ports`.
+Не публикуйте `5678`, `8787`, `5432`: в Compose у n8n, PostgreSQL и Wizard нет `ports`, только внутренняя сеть.
 
 Пример UFW:
 
@@ -151,34 +103,69 @@ sudo ufw allow ssh
 sudo ufw enable
 ```
 
+## OAuth callback URL
+
+```text
+https://<domain>/rest/oauth2-credential/callback
+```
+
+Укажите этот URL в OAuth-приложении Google/HubSpot. n8n находится за Caddy с `N8N_PROXY_HOPS=1`, поэтому схема определяется как `https`.
+
+## Webhook URL
+
+Production:
+
+```text
+https://<domain>/webhook/lead-intake
+```
+
+Test:
+
+```text
+https://<domain>/webhook-test/lead-intake
+```
+
+Header Auth (`X-Webhook-Secret`) остаётся обязательным. HTTPS не заменяет секрет.
+
+## Управление после установки
+
+Все штатные действия выполняются в `/setup/`:
+
+- повторная настройка клиента и интеграций;
+- проверка credentials и doctor;
+- просмотр операций, `needs_reconciliation` и retry;
+- ручной retry операции;
+- backup/list/restore конфигурации;
+- проверка доступности Caddy, n8n, PostgreSQL, Wizard.
+
+CLI-команды ниже нужны только разработчикам и для аварийной диагностики:
+
+```bash
+docker compose ps
+docker compose logs -f caddy n8n wizard postgres
+docker compose exec -T wizard bash -lc 'cd /app && BASE_URL=http://n8n:5678 ./scripts/doctor.sh'
+```
+
 ## Резервное копирование
 
 Сохраняйте:
 
-- `.env` (содержит секреты; режим `600`).
-- `config/client.json` и backup-файлы `config/.client-config.*`.
-- `wizard-data/` (auth и токен мастера).
-- PostgreSQL volume `postgres_data`.
-- n8n volume `n8n_data` (credentials, workflow state).
-- Caddy volume `caddy_data` (сертификаты).
+- `.env` (секреты; mode `600`);
+- `config/client.json` и `config/.client-config.*`;
+- `wizard-data/`;
+- volume `postgres_data`;
+- volume `n8n_data`;
+- volumes `caddy_data` и `caddy_config`.
 
-Логический backup PostgreSQL:
-
-```bash
-docker compose -f docker-compose.yml -f docker-compose.server.yml exec -T postgres \
-  pg_dump -U "${POSTGRES_USER:-n8n}" -d "${POSTGRES_DB:-n8n}" > backup-$(date +%F).sql
-```
-
-Файловый backup каталогов и volumes:
+Пример:
 
 ```bash
+docker compose exec -T postgres pg_dump -U "${POSTGRES_USER:-n8n}" -d "${POSTGRES_DB:-n8n}" > backup-$(date +%F).sql
 sudo tar -czf crm-kit-backup-$(date +%F).tar.gz \
-  .env config wizard-data docker-compose.yml docker-compose.server.yml Caddyfile
+  .env config wizard-data docker-compose.yml Caddyfile
 ```
 
-Для volumes используйте snapshot провайдера или
-`docker run --rm -v crm-automation-kit_postgres_data:/data ...` по вашей политике.
-Перед обновлениями делайте backup всегда.
+Backup конфигурации также доступен в `/setup/` → «Управление»; восстановление делает backup текущей версии перед заменой.
 
 ## Обновление
 
@@ -188,18 +175,14 @@ git pull --ff-only
 sudo ./scripts/install-server.sh crm.example.com admin@example.com
 ```
 
-Установщик заново проверит конфиг, пересоздаст unit при необходимости, выполнит
-`docker compose ... up -d`, миграции и не будет импортировать workflow, если он уже есть.
-Существующие credentials и данные сохраняются. Caddy автоматически подхватит
-актуальные образы после `docker compose pull` (если вы обновляете теги вручную).
+Установщик пересоберёт Wizard, поднимет стек, применит миграции и не будет импортировать workflow, если он уже есть. Credentials и данные сохраняются. Caddy автоматически подхватит новые образы после `docker compose pull` (если теги обновляются вручную).
 
 ## Откат
 
-1. Остановите сервисы, сохранив volumes:
+1. Остановите стек без удаления volumes:
 
 ```bash
-sudo systemctl disable --now crm-wizard.service
-docker compose -f docker-compose.yml -f docker-compose.server.yml down
+docker compose down
 ```
 
 2. Верните предыдущую версию кода:
@@ -208,30 +191,28 @@ docker compose -f docker-compose.yml -f docker-compose.server.yml down
 git checkout <previous-tag-or-commit>
 ```
 
-3. Восстановите `.env`, `config/`, `wizard-data/` и, при необходимости, дамп PostgreSQL
-   из backup.
-4. Поднимите прежнюю версию:
+3. Восстановите `.env`, `config/`, `wizard-data/` и, при необходимости, дамп PostgreSQL.
+4. Запустите установщик прежней версии.
 
-```bash
-sudo ./scripts/install-server.sh crm.example.com admin@example.com
-```
+Не используйте `docker compose down -v`, если хотите сохранить базу, credentials и сертификаты.
 
-`docker compose ... down` не удаляет named volumes; не используйте `-v`, если хотите
-сохранить базу, credentials и сертификаты.
+## Миграция с v0.4.1
+
+v0.5 использует те же имена volumes `postgres_data` и `n8n_data` и тот же Compose project `crm-automation-kit`, поэтому данные и credentials сохраняются. Отличия:
+
+- Caddy перенесён из overlay/host-network в общую Compose-сеть;
+- Wizard больше не отдельный процесс на хосте, а контейнер;
+- n8n, PostgreSQL и Wizard больше не публикуют порты на хост;
+- `docker-compose.server.yml` и `scripts/start-wizard.sh` удалены.
+
+Перед обновлением сделайте backup volumes и `.env`.
 
 ## Диагностика
 
-- Caddy не получает сертификат: проверьте DNS, порты 80/443 и
-  `docker logs crm-automation-kit-caddy-1` (имя контейнера может отличаться).
-- `502` на `/`: n8n не готов — `docker compose ... ps` и `logs n8n`.
-- Мастер отвечает `403 invalid_host`: проверьте `WIZARD_ALLOWED_HOSTS=<domain>` в `.env`
-  и перезапустите `crm-wizard.service`.
-- Мастер не стартует: `journalctl -u crm-wizard.service -n 100 --no-pager`.
-  Проверьте Node.js 22+ и `command -v node`; установщик добавляет каталог Node в PATH unit.
-- `doctor`/workflow из мастера падают с доступом к Docker: пользователь из
-  `SUDO_USER` не входит в группу `docker`; добавьте его или запускайте установщик от root.
-- Порт занят: остановите конфликтующий сервис или освободите 80/443.
-- Нет first-run URL, хотя `wizard-data/auth.json` отсутствует: установщик печатает
-  токен из `wizard-data/bootstrap-token` при каждом запуске. Не удаляйте `auth.json`
-  без необходимости; для сброса администратора остановите сервис, удалите
-  `wizard-data/auth.json`, создайте новый `bootstrap-token` и перезапустите установщик.
+- Caddy не получает сертификат: проверьте DNS, порты `80/443`, `docker compose logs caddy`.
+- `502` на `/`: n8n не готов — `docker compose ps`, `docker compose logs n8n`.
+- `502` на `/setup/`: Wizard не готов — `docker compose ps`, `docker compose logs wizard`.
+- Мастер отвечает `403 invalid_host`: проверьте `WIZARD_ALLOWED_HOSTS` и `CRM_DOMAIN`; перезапустите `docker compose up -d wizard`.
+- Docker-операции мастера падают: проверьте mount `/var/run/docker.sock` и права контейнера.
+- Порт занят: остановите конфликтующий сервис или освободите `80/443`.
+- Нет first-run URL: проверьте `wizard-data/bootstrap-token` и отсутствие `wizard-data/auth.json`.

@@ -87,6 +87,21 @@ test('saves a valid config atomically and keeps a backup', async () => {
   assert.equal(mode, 0o600);
 });
 
+test('creates, lists, and restores config backups without traversal', async () => {
+  const before = JSON.parse(await fs.readFile(tempConfig, 'utf8'));
+  const created = await configModule.createConfigBackup();
+  assert.match(created.name, /^\.client-config\..+\.json$/);
+  const listed = await configModule.listConfigBackups();
+  assert.equal(listed.some((item) => item.name === created.name), true);
+  await configModule.saveConfig({ clientName: 'After Backup' });
+  const restored = await configModule.restoreConfigBackup(created.name);
+  assert.equal(restored.config.clientName, before.clientName);
+  await assert.rejects(
+    () => configModule.restoreConfigBackup('../client.json'),
+    (error) => error.code === 'invalid_backup',
+  );
+});
+
 test('n8n client lists paginated credentials, creates, tests, and updates workflow safely', async () => {
   const requests = [];
   const server = http.createServer((req, res) => {

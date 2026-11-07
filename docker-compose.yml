@@ -24,8 +24,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-    ports:
-      - "${N8N_BIND_ADDRESS:-127.0.0.1}:${N8N_PORT:-5678}:5678"
+    expose:
+      - "5678"
     environment:
       DB_TYPE: postgresdb
       DB_POSTGRESDB_HOST: postgres
@@ -34,25 +34,24 @@ services:
       DB_POSTGRESDB_USER: ${POSTGRES_USER:-n8n}
       DB_POSTGRESDB_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
       DB_POSTGRESDB_SCHEMA: public
-      N8N_HOST: ${N8N_HOST:-localhost}
+
+      # Single public ingress: Caddy. n8n must know only the public origin.
+      N8N_HOST: ${CRM_DOMAIN:?Set CRM_DOMAIN in .env}
       N8N_PORT: 5678
-      N8N_PROTOCOL: ${N8N_PROTOCOL:-http}
-      N8N_WEBHOOK_URL: ${N8N_WEBHOOK_URL:-http://localhost:5678/}
-      # Public editor base URL. Overridden by .env / the server overlay.
-      N8N_EDITOR_BASE_URL: ${N8N_EDITOR_BASE_URL:-http://localhost:5678/}
-      # Trusted reverse-proxy hops: 0 locally, 1 in the Caddy server overlay.
-      N8N_PROXY_HOPS: ${N8N_PROXY_HOPS:-0}
+      N8N_PROTOCOL: https
+      N8N_EDITOR_BASE_URL: https://${CRM_DOMAIN:?Set CRM_DOMAIN in .env}/
+      N8N_WEBHOOK_URL: https://${CRM_DOMAIN:?Set CRM_DOMAIN in .env}/
+      N8N_PROXY_HOPS: "1"
+      N8N_SECURE_COOKIE: "true"
+
       N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY:?Set N8N_ENCRYPTION_KEY in .env}
       N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS: "true"
       N8N_DIAGNOSTICS_ENABLED: "false"
       N8N_BLOCK_ENV_ACCESS_IN_NODE: "true"
-      # n8n 2.x restricts file nodes to ~/.n8n-files by default.
-      # This explicitly allows only the mounted config directory.
       N8N_RESTRICT_FILE_ACCESS_TO: /home/node/config
       N8N_LOG_LEVEL: ${N8N_LOG_LEVEL:-info}
       GENERIC_TIMEZONE: ${GENERIC_TIMEZONE:-UTC}
       TZ: ${TZ:-UTC}
-      # PII retention: keep executions and their payloads for 7 days, max 5000 runs.
       EXECUTIONS_DATA_PRUNE: ${EXECUTIONS_DATA_PRUNE:-true}
       EXECUTIONS_DATA_MAX_AGE: ${EXECUTIONS_DATA_MAX_AGE:-168}
       EXECUTIONS_DATA_PRUNE_MAX_COUNT: ${EXECUTIONS_DATA_PRUNE_MAX_COUNT:-5000}
@@ -68,6 +67,96 @@ services:
       retries: 12
       start_period: 45s
 
+  wizard:
+    build:
+      context: .
+      dockerfile: wizard/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      n8n:
+        condition: service_healthy
+    expose:
+      - "8787"
+    environment:
+      NODE_ENV: production
+      WIZARD_SERVER_MODE: "1"
+      WIZARD_HOST: 0.0.0.0
+      WIZARD_PORT: "8787"
+      WIZARD_ALLOW_REMOTE: "1"
+      WIZARD_TRUST_PROXY: "1"
+      WIZARD_ALLOWED_HOSTS: ${CRM_DOMAIN:?Set CRM_DOMAIN in .env}
+      WIZARD_COOKIE_SECURE: "1"
+      WIZARD_COOKIE_PATH: /setup
+      WIZARD_DATA_DIR: /data
+      WIZARD_SECRET_KEY: ${WIZARD_SECRET_KEY:?Set WIZARD_SECRET_KEY in .env}
+      WIZARD_CONFIG_FILE: /app/config/client.json
+      WIZARD_CONFIG_UID: ${WIZARD_CONFIG_UID:-0}
+      WIZARD_CONFIG_GID: ${WIZARD_CONFIG_GID:-0}
+      LEAD_CONFIG_FILE: /app/config/client.json
+
+      N8N_API_URL: http://n8n:5678
+      N8N_PUBLIC_URL: https://${CRM_DOMAIN:?Set CRM_DOMAIN in .env}/
+      BASE_URL: http://n8n:5678
+      WORKFLOW_ID: ${WORKFLOW_ID:-7c9f5a2e-3b4d-4f6a-9c1e-2d8b7a6f5e40}
+
+      POSTGRES_DB: ${POSTGRES_DB:-n8n}
+      POSTGRES_USER: ${POSTGRES_USER:-n8n}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      LEAD_WEBHOOK_SECRET: ${LEAD_WEBHOOK_SECRET:?Set LEAD_WEBHOOK_SECRET in .env}
+      LEAD_WEBHOOK_HEADER_NAME: ${LEAD_WEBHOOK_HEADER_NAME:-X-Webhook-Secret}
+
+      COMPOSE_PROJECT_NAME: crm-automation-kit
+      COMPOSE_FILE: /app/docker-compose.yml
+    volumes:
+      - ./config:/app/config
+      - ./wizard-data:/data
+      - ./scripts:/app/scripts:ro
+      - ./workflows:/app/workflows:ro
+      - ./db:/app/db:ro
+      - ./examples:/app/examples:ro
+      - ./docker-compose.yml:/app/docker-compose.yml:ro
+      - ./.env:/app/.env:ro
+      # Existing doctor/import/recovery scripts operate the same project.
+      # The wizard is reachable only through Caddy, never directly.
+      - /var/run/docker.sock:/var/run/docker.sock
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:8787/api/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  caddy:
+    image: caddy:2.10-alpine
+    restart: unless-stopped
+    depends_on:
+      n8n:
+        condition: service_healthy
+      wizard:
+        condition: service_healthy
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      CRM_DOMAIN: ${CRM_DOMAIN:?Set CRM_DOMAIN in .env}
+      ACME_EMAIL: ${ACME_EMAIL:?Set ACME_EMAIL in .env}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
 volumes:
   postgres_data:
   n8n_data:
+  caddy_data:
+  caddy_config:

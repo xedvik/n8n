@@ -1,155 +1,149 @@
-# CRM Automation Kit v0.4.1
+# CRM Automation Kit v0.5
 
-Переиспользуемый lead-intake kit для n8n: HTTP webhook → нормализация → валидация → идемпотентная операция в PostgreSQL → CRM → опциональный журнал → опциональные уведомления → HTTP-ответ.
+Переиспользуемый lead-intake kit для n8n: HTTP webhook → нормализация → валидация → идемпотентная операция в PostgreSQL → CRM → журнал → уведомления → HTTP-ответ.
 
-Основная идея v0.3: повторный или конкурентный запрос не должен повторно создавать контакт, строку журнала или отправлять уведомление. Состояние операции и стадий хранится в PostgreSQL; внешние API остаются источником истины для уже подтверждённых действий.
+## Один продукт, один стек
 
-## Возможности
+v0.5 убирает разделение Local/Server. Всегда используется один Docker Compose-стек:
 
-- **Идемпотентность** по `external_id` (поле заявки) или заголовку `Idempotency-Key`.
-- Одинаковый ключ + другой payload → контролируемый `409 idempotency_conflict`.
-- Повтор завершённой операции → сохранённый ответ с `200` и `replayed:true`.
-- Конкурентные одинаковые запросы → один выполняет работу, второй получает `202 in_progress`.
-- **PostgreSQL state machine**: `processing`, `retry_scheduled`, `completed`, `failed`, `needs_reconciliation`.
-- **Независимые стадии** CRM / Journal / Telegram с восстановлением уже подтверждённых стадий.
-- **Retry** для 429, 5xx, timeout и сетевых ошибок; exponential backoff + jitter.
-- `Retry-After` учитывается, когда HTTP-ответ его предоставляет.
-- **Schedule Trigger** раз в минуту возвращает в работу `retry_scheduled` и зависшие `processing`.
-- **Безопасный ручной retry** конкретной операции и очистка старых завершённых операций.
-- **HubSpot**: поиск по email, create/update, full-response handling, контролируемые ошибки.
-- **Google Sheets CRM** — режим обратной совместимости с v0.1; **Google Sheets Journal** и **Errors** — отдельно.
-- **Telegram** — опциональные уведомления.
-- **Header Auth** на webhook.
-- Конфигурация v2; legacy v1 нормализуется автоматически.
-- Время в Sheets/Telegram — в IANA timezone клиента; технические timestamps — UTC.
-
-Стек: `docker.n8n.io/n8nio/n8n:2.46.6`, `postgres:17.11-alpine`, Docker Compose.
-
-## Веб-мастер настройки (v0.4.1)
-
-Для настройки клиента через браузер, без ручного редактирования конфига:
-
-```bash
-./scripts/start-wizard.sh
+```text
+                 HTTPS :443
+                     │
+                  ┌──▼──┐
+                  │Caddy│
+                  └──┬──┘
+          /setup/*   │   /, /webhook/*, /rest/*, /api/v1/*
+          ┌──────────┴──────────┐
+          ▼                     ▼
+      ┌────────┐           ┌────────┐
+      │ Wizard │           │  n8n   │
+      └───┬────┘           └───┬────┘
+          │  internal network  │
+          └──────────┬─────────┘
+                     ▼
+                ┌─────────┐
+                │Postgres │
+                └─────────┘
 ```
 
-Мастер откроется на `http://127.0.0.1:8787`. Он работает только локально, не передаёт `N8N_API_KEY` в браузер и сохраняет конфиг атомарно с backup. Для автоматического создания credentials нужен n8n API key: `http://127.0.0.1:5678/settings/api` (scopes: `workflow:read`, `workflow:update`, `workflow:activate`, `credential:list`, `credential:read`, `credential:create`).
+- `/` — n8n UI, public API, OAuth callbacks.
+- `/setup/` — полный мастер настройки и управления.
+- `/webhook/` — webhook n8n.
+- Caddy — единственный публичный контейнер; n8n, PostgreSQL и Wizard не публикуют порты на хост.
+- Контейнеры запускаются автоматически после перезагрузки Docker (`restart: unless-stopped`).
 
-Подробнее: [docs/WIZARD.md](docs/WIZARD.md).
+## Установка
 
-## Серверное развёртывание (один домен, HTTPS)
-
-Для публичного сервера Caddy публикует n8n и мастер на одном домене: n8n — на `/`,
-мастер — на `/setup/`. n8n остаётся на loopback, PostgreSQL наружу не публикуется.
+Требования на сервере: Linux, Docker Engine, Docker Compose plugin, `openssl`, `curl`, открытые TCP `80/443`, DNS-запись домена.
 
 ```bash
+git clone <repository> /opt/crm-automation-kit
+cd /opt/crm-automation-kit
 sudo ./scripts/install-server.sh crm.example.com admin@example.com
 ```
 
-Установщик создаёт `.env`, генерирует секреты, ставит systemd-юнит мастера, поднимает
-Compose, применяет миграции и печатает первые шаги. Повторный запуск сохраняет данные
-и секреты. Подробности, DNS/TLS, backup и откат: [docs/SERVER.md](docs/SERVER.md).
-
-## Быстрый старт
-
-Требования: Docker Compose и `python3` для onboarding-скриптов. Для веб-мастера нужен Node.js 22 на хосте; ручные скрипты используют Node внутри контейнера n8n.
+Альтернативная проверка без установщика (тот же стек):
 
 ```bash
 cp .env.example .env
-# заполнить POSTGRES_PASSWORD, N8N_ENCRYPTION_KEY, LEAD_WEBHOOK_SECRET
-docker compose up -d
-./scripts/setup-client.sh   # создаёт config/client.json
-./scripts/migrate.sh        # для существующего volume; новый volume применяет db/migrations автоматически
-./scripts/import-workflow.sh
+# заменить CRM_DOMAIN, ACME_EMAIL и CHANGE_ME-секреты
+docker compose up -d --build
 ```
 
-`setup-client.sh` создаёт `config/client.json`, помогает выбрать интеграции, timezone и проверяет конфиг. Каталог `./config` смонтирован в n8n целиком, поэтому изменения `client.json` видны без пересоздания контейнера; конфиг читается на каждый запрос.
+Установщик — единственная точка развёртывания. Он:
 
-> `import-workflow.sh` импортирует workflow без credentials. Для существующего клиента используйте n8n UI, чтобы не потерять назначенные credentials.
+1. создаёт `.env` и генерирует `POSTGRES_PASSWORD`, `N8N_ENCRYPTION_KEY`, `LEAD_WEBHOOK_SECRET`, `WIZARD_SECRET_KEY`;
+2. создаёт `wizard-data/` и одноразовый bootstrap-токен;
+3. собирает и запускает **один** Compose-стек: Caddy + n8n + PostgreSQL + Wizard;
+4. применяет миграции и импортирует workflow, если его ещё нет;
+5. печатает first-run URL вида `https://<domain>/setup/?token=...`.
 
-Назначьте credentials в n8n:
+Node.js и отдельный процесс мастера на хосте не требуются. Все действия после развёртывания выполняются в браузере.
 
-| Нода | Credential |
-|---|---|
-| `Lead Webhook` | Header Auth (`X-Webhook-Secret`) |
-| `Reserve Operation`, все `Save * State`, `Select Due Operations` | PostgreSQL `leadOperationsPg` («CRM Automation Kit DB») |
-| `CRM Adapter - Google Sheets`, `Journal Adapter`, `Error Log Adapter`, `Read CRM Leads`, `Read Journal` | Google Sheets OAuth2 / Service Account |
-| `HubSpot Search/Create/Update Contact` | HubSpot Service Key / OAuth2 |
-| `Notification Adapter - Telegram` | Telegram API |
-| `Recovery Request` | тот же Header Auth, что у `Lead Webhook` |
+### Первый вход
 
-Опубликуйте workflow и выполните:
+1. Откройте `https://<domain>/` и создайте owner-аккаунт n8n.
+2. Откройте `https://<domain>/settings/api` и создайте API key со scopes:
+   - `workflow:read`
+   - `workflow:update`
+   - `workflow:activate`
+   - `credential:list`
+   - `credential:read`
+   - `credential:create`
+3. Откройте first-run URL из вывода установщика.
+4. Зарегистрируйте единственного администратора `/setup/`.
+5. Подключите n8n API key в мастере.
+6. Пройдите шаги настройки и завершите тестовой заявкой.
+
+Повторная регистрация закрыта. Пароль хранится как scrypt-hash, сессия — в HttpOnly/SameSite=Strict/Secure cookie с HMAC-подписью. Bootstrap-токен удаляется после регистрации.
+
+## Полный onboarding
+
+`/setup/` покрывает весь цикл:
+
+1. **Обзор** — состояние n8n, API key, workflow, credentials.
+2. **Адрес** — публичный URL, webhook URL, OAuth callback, проверка доступности.
+3. **Клиент** — название, IANA timezone, текущее время.
+4. **Интеграции** — HubSpot / Google Sheets / без CRM, Journal, Telegram, Errors, источники.
+5. **HubSpot** — private app, scopes, Service Key или OAuth2.
+6. **Google Sheets** — URL/ID таблицы, вкладки, Service Account или OAuth2, автоматическое создание таблицы и заголовков.
+7. **Telegram** — BotFather, token, Chat ID, проверка `getMe`/`getChat`.
+8. **Маппинг и поведение** — поля входной заявки, идемпотентность, retention, retry.
+9. **Проверка** — сохранение конфига, создание/переиспользование credentials, назначение 19 нодам workflow, `doctor.sh`, подтверждённая тестовая заявка.
+10. **Управление** — сервисы, операции, `needs_reconciliation`, ручной retry, backup/restore конфига, doctor.
+
+Внешние сервисы открываются по ссылкам. Где API не позволяет автоматизацию (OAuth Connect, шаринг Google-таблицы), мастер объясняет точное действие в браузере.
+
+## Что сохраняется
+
+- `config/client.json` — конфигурация клиента, mode `0600`, атомарная запись, backup `config/.client-config.*.json`.
+- `wizard-data/` — администратор, сессии, зашифрованный n8n API key, bootstrap-токен.
+- `n8n_data` — credentials, workflow state.
+- `postgres_data` — state machine и данные.
+- `caddy_data` / `caddy_config` — TLS-сертификаты.
+
+n8n API key шифруется AES-256-GCM с ключом, производным от `WIZARD_SECRET_KEY`; в браузер, DOM, storage и логи он не попадает.
+
+## Основные команды
 
 ```bash
-./scripts/doctor.sh
+# статус
+docker compose ps
+
+# логи
+docker compose logs -f caddy n8n wizard postgres
+
+# обновление кода
+git pull --ff-only
+sudo ./scripts/install-server.sh crm.example.com admin@example.com
+
+# остановка без удаления данных
+docker compose down
 ```
 
-Диагностика с реальной тестовой заявкой (создаст данные и может отправить уведомление):
+CLI-скрипты (`doctor.sh`, `retry-operation.sh`, `import-workflow.sh`, `migrate.sh`) сохранены для разработки и аварийной диагностики. Для штатной настройки и управления они не нужны: всё доступно в `/setup/`.
 
-```bash
-./scripts/doctor.sh --integration-test
-```
+## HTTP-контракт заявок
 
-## HTTP-контракт
-
-| Ситуация | HTTP | Основной статус |
+| Ситуация | HTTP | Статус |
 |---|---|---|
 | Новая заявка, CRM создала запись | `201` | `created` |
-| Новая заявка, HubSpot обновил контакт | `200` | `updated` |
+| HubSpot обновил контакт | `200` | `updated` |
 | Повтор завершённой операции | `200` | сохранённый статус + `replayed:true` |
-| Тот же ключ, другие данные | `409` | `idempotency_conflict` |
-| Одинаковая операция уже выполняется | `202` | `in_progress` |
-| CRM retry запланирован | `202` | `retry_scheduled` / `crm_retry_scheduled` |
-| Нужна ручная сверка (например, Telegram) | `202` | `needs_reconciliation` |
+| Тот же ключ, другой payload | `409` | `idempotency_conflict` |
+| Операция уже выполняется | `202` | `in_progress` |
+| CRM retry запланирован | `202` | `retry_scheduled` |
+| Нужна ручная сверка | `202` | `needs_reconciliation` |
 | CRM окончательно не сохранила | `502` | `crm_write_failed` |
 | Ошибка конфигурации | `500` | `configuration_error` |
-| Ошибка записи state store | `503` | `state_store_failed` |
 
-`201` не возвращается, пока CRM не подтвердила создание. Для phone-only HubSpot заявки используется `202 crm_skipped` по политике `skip`.
-
-## State store
-
-Таблица `app.lead_operations` создаётся миграцией `db/migrations/001_lead_operations.sql`.
-
-Основные функции:
-
-- `app.reserve_lead_operation(...)` — атомарно создать/найти операцию и захватить её для recovery;
-- `app.save_operation_state(uuid,jsonb)` — обновить стадии и ответ;
-- `app.cleanup_lead_operations(retention_days)` — удалить только `completed`/`failed`.
-
-Полезные команды:
-
-```bash
-./scripts/retry-operation.sh <operation-id>
-./scripts/retry-operation.sh <operation-id> --reset-attempts
-./scripts/cleanup-operations.sh --dry-run
-./scripts/cleanup-operations.sh
-```
-
-`retry-operation.sh` отказывается работать с `completed` и активной `processing` операцией. Подтверждённые CRM/Journal-стадии сохраняются.
-
-## Конфигурация
-
-Основные блоки `config/client.json`:
-
-- `source` — тип источника, default source, allowed sources.
-- `timezone` — IANA timezone клиента.
-- `mapping` — входные поля → внутренний Lead.
-- `crm.provider` — `hubspot`, `google_sheets` или `none`.
-- `crm.hubspot` / `crm.googleSheets` — настройки CRM.
-- `journal` — независимый журнал Google Sheets.
-- `notifications` — Telegram.
-- `errors` — error log Google Sheets.
-- `idempotency` — `enabled`, `retentionDays`, `withoutKeyPolicy` (`process_new`).
-- `retry` — `maxAttempts`, `baseDelaySeconds`, `maxDelaySeconds`, `processingTimeoutSeconds`.
-
-Пример: [`config/example-client.json`](config/example-client.json). Legacy v1 нормализуется в Google Sheets-only режим.
+Webhook: `https://<domain>/webhook/lead-intake`, Header Auth обязателен.
 
 ## Документация
 
-- [Веб-мастер настройки](docs/WIZARD.md)
-- [Серверное развёртывание (Caddy, HTTPS, один домен)](docs/SERVER.md)
-- [Пошаговая настройка с нуля](docs/SETUP.md)
+- [Установка и эксплуатация единого стека](docs/SERVER.md)
+- [Мастер `/setup/`](docs/WIZARD.md)
+- [Пошаговая настройка и внутренние детали](docs/SETUP.md)
 - [Google Sheets](docs/integrations/google-sheets.md)
 - [Telegram](docs/integrations/telegram.md)
 - [HubSpot](docs/integrations/hubspot.md)
@@ -158,39 +152,29 @@ docker compose up -d
 ## Структура
 
 ```text
-workflows/lead-intake.json      # v0.3 workflow (94 nodes)
-Caddyfile                       # HTTPS reverse proxy для серверного режима
-docker-compose.server.yml       # overlay: Caddy + loopback-only n8n
-config/example-client.json      # v2-шаблон конфига
-config/example-legacy-google-sheets.json
-config/client.json              # локальный конфиг клиента, gitignored
-db/migrations/                  # PostgreSQL schema/functions
-scripts/setup-client.sh         # интерактивный onboarding
-scripts/install-server.sh       # установка серверного режима (Caddy, systemd)
-scripts/start-wizard.sh         # локальный веб-мастер v0.4.1
-wizard/                         # backend + static UI мастера
-scripts/migrate.sh              # применение миграций
-scripts/doctor.sh               # диагностика + независимый API read-back
-scripts/retry-operation.sh      # точечный ручной retry
-scripts/cleanup-operations.sh   # retention cleanup
-scripts/import-workflow.sh      # импорт для свежей установки
-scripts/config-check.mjs        # валидация конфига тем же кодом, что в workflow
-docs/                           # инструкции и troubleshooting
-tests/                          # unit и smoke тесты
+docker-compose.yml       # единый стек: Caddy, n8n, PostgreSQL, Wizard
+Caddyfile                # единственный HTTPS ingress
+wizard/                  # backend + static UI; Dockerfile
+scripts/install-server.sh# one-command deployment
+scripts/doctor.sh        # диагностика/read-back (используется мастером)
+scripts/import-workflow.sh
+scripts/migrate.sh
+scripts/retry-operation.sh
+scripts/cleanup-operations.sh
+workflows/lead-intake.json
+config/example-client.json
+db/migrations/
+tests/
+docs/
 ```
 
 ## Безопасность и ограничения
 
-- `.env`, `config/client.json`, `config/.client-config.*` и `config/*.local.json` не попадают в Git.
-- Веб-мастер слушает только loopback и защищает POST-запросы токеном, который меняется при каждом запуске.
-- В workflow нет credentials: их нужно назначить в n8n UI после импорта.
-- Header Auth обязателен для webhook; секрет хранится в n8n credential и локальном `.env` для тестов.
-- PII в executions ограничена retention: 7 дней / 5000 записей. Google Sheets Journal/Errors хранят PII отдельно и требуют собственной политики доступа/очистки.
-- В `app.lead_operations` сохраняется raw payload; настройте retention и доступ к PostgreSQL.
-- Время в Sheets/Telegram отображается в IANA timezone клиента; executions хранят UTC timestamp.
-- Kit не гарантирует exactly-once для внешних API. Он предотвращает повторное выполнение подтверждённых стадий и помечает неоднозначные результаты как `needs_reconciliation`.
-- Нет rate limiting на входящем webhook; Header Auth не заменяет rate limiting.
-- Google Sheets не создаёт таблицы/вкладки/заголовки автоматически.
-- Один webhook-запрос за execution.
-- HubSpot Service Key — вариант по умолчанию; OAuth2 поддерживается после смены Credential Type в трёх HubSpot HTTP-нодах.
-- Для phone-only HubSpot заявок поддерживается только `phoneOnlyPolicy=skip`.
+- Публично доступны только Caddy `80/443`; n8n, PostgreSQL и Wizard — только внутри Compose-сети.
+- Административный интерфейс защищён логином; setup API требует CSRF-токен и сессию.
+- Секреты не возвращаются в API и не пишутся в браузерное storage.
+- Docker socket смонтирован в Wizard только для существующих doctor/import/recovery скриптов; это требует доверия к контейнеру и root-доступу на хосте.
+- Компрометация root на хосте раскрывает `.env`, Docker volumes и ключи. Нужны full-disk encryption, ограниченный SSH и firewall.
+- Kit не гарантирует exactly-once для внешних API; неоднозначные стадии помечаются `needs_reconciliation`.
+- Google Sheets не создаёт произвольную структуру вне заданных вкладок/заголовков.
+- OAuth2 HubSpot/Google требует ручного Connect в n8n.

@@ -3,7 +3,7 @@
 	admin off
 }
 
-{$CRM_DOMAIN} {
+https://{$CRM_DOMAIN} {
 	encode zstd gzip
 
 	header {
@@ -13,16 +13,16 @@
 		-Server
 	}
 
-	# /setup is the wizard; redirect to the canonical trailing-slash URL.
+	# Canonical setup URL. Caddy terminates TLS and strips /setup before
+	# forwarding to the wizard's internal port.
 	redir /setup /setup/ 308
 
-	# handle_path strips /setup before forwarding to the loopback wizard.
 	handle_path /setup/* {
-		reverse_proxy 127.0.0.1:{$WIZARD_PORT:8787}
+		reverse_proxy wizard:8787
 	}
 
-	# Everything else (n8n UI, API, OAuth callbacks, webhooks) goes to n8n.
+	# n8n UI, public API, OAuth callbacks and webhooks share the same origin.
 	handle {
-		reverse_proxy 127.0.0.1:{$N8N_PORT:5678}
+		reverse_proxy n8n:5678
 	}
 }

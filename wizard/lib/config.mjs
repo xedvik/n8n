@@ -10,6 +10,13 @@ export const TEMPLATE_PATH = path.resolve(ROOT, process.env.WIZARD_TEMPLATE_FILE
 export const CONFIG_CHECK = path.join(ROOT, 'scripts/config-check.mjs');
 
 let writeQueue = Promise.resolve();
+const CONFIG_UID = Number(process.env.WIZARD_CONFIG_UID || 0);
+const CONFIG_GID = Number(process.env.WIZARD_CONFIG_GID || 0);
+
+async function preserveOwner(file) {
+  if (!file || (!CONFIG_UID && !CONFIG_GID)) return;
+  await fs.chown(file, CONFIG_UID, CONFIG_GID).catch(() => {});
+}
 
 function isPlainObject(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -95,44 +102,115 @@ export async function buildCandidateConfig(patch) {
   return safeMerge(base, patch);
 }
 
+async function writeValidatedConfig(config) {
+  const validated = await validateConfig(config);
+  if (!validated.ok) {
+    const error = new Error(validated.error);
+    error.code = 'invalid_config';
+    throw error;
+  }
+
+  await fs.mkdir(path.dirname(CONFIG_PATH), { recursive: true });
+  let backupCreated = false;
+  let backupName = null;
+  try {
+    await fs.access(CONFIG_PATH);
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    backupName = `.client-config.${stamp}.json`;
+    const backup = path.join(path.dirname(CONFIG_PATH), backupName);
+    await fs.copyFile(CONFIG_PATH, backup);
+    await fs.chmod(backup, 0o600).catch(() => {});
+    await preserveOwner(backup);
+    backupCreated = true;
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+  }
+
+  const tmp = path.join(
+    path.dirname(CONFIG_PATH),
+    `.client-config.${process.pid}.${Date.now()}.tmp`,
+  );
+  try {
+    await fs.writeFile(tmp, `${JSON.stringify(validated.config, null, 2)}\n`, { mode: 0o600 });
+    await fs.rename(tmp, CONFIG_PATH);
+    await fs.chmod(CONFIG_PATH, 0o600).catch(() => {});
+    await preserveOwner(CONFIG_PATH);
+  } finally {
+    await fs.rm(tmp, { force: true }).catch(() => {});
+  }
+  return { config: validated.config, backupCreated, backupName };
+}
+
 export async function saveConfig(patch) {
   const operation = writeQueue.then(async () => {
     const candidate = await buildCandidateConfig(patch);
-    const validated = await validateConfig(candidate);
-    if (!validated.ok) {
-      const error = new Error(validated.error);
-      error.code = 'invalid_config';
-      throw error;
-    }
-
-    await fs.mkdir(path.dirname(CONFIG_PATH), { recursive: true });
-    let backupCreated = false;
-    try {
-      await fs.access(CONFIG_PATH);
-      const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-      const backup = path.join(path.dirname(CONFIG_PATH), `.client-config.${stamp}.json`);
-      await fs.copyFile(CONFIG_PATH, backup);
-      await fs.chmod(backup, 0o600).catch(() => {});
-      backupCreated = true;
-    } catch (error) {
-      if (error.code !== 'ENOENT') throw error;
-    }
-
-    const tmp = path.join(
-      path.dirname(CONFIG_PATH),
-      `.client-config.${process.pid}.${Date.now()}.tmp`,
-    );
-    try {
-      await fs.writeFile(tmp, `${JSON.stringify(validated.config, null, 2)}\n`, { mode: 0o600 });
-      await fs.rename(tmp, CONFIG_PATH);
-      await fs.chmod(CONFIG_PATH, 0o600).catch(() => {});
-    } finally {
-      await fs.rm(tmp, { force: true }).catch(() => {});
-    }
-    return { config: validated.config, backupCreated };
+    return writeValidatedConfig(candidate);
   });
   writeQueue = operation.catch(() => {});
   return operation;
+}
+
+export async function replaceConfig(config) {
+  if (!isPlainObject(config)) {
+    throw Object.assign(new Error('Конфигурация должна быть JSON-объектом.'), { code: 'validation_error' });
+  }
+  const operation = writeQueue.then(() => writeValidatedConfig(config));
+  writeQueue = operation.catch(() => {});
+  return operation;
+}
+
+export async function listConfigBackups() {
+  const dir = path.dirname(CONFIG_PATH);
+  let entries;
+  try {
+    entries = await fs.readdir(dir, { withFileTypes: true });
+  } catch (error) {
+    if (error.code === 'ENOENT') return [];
+    throw error;
+  }
+  const backups = [];
+  for (const entry of entries) {
+    if (!entry.isFile() || !/^\.client-config\..+\.json$/.test(entry.name)) continue;
+    const file = path.join(dir, entry.name);
+    const stat = await fs.stat(file);
+    backups.push({ name: entry.name, size: stat.size, modifiedAt: stat.mtime.toISOString() });
+  }
+  return backups.sort((a, b) => b.name.localeCompare(a.name));
+}
+
+export async function createConfigBackup() {
+  try {
+    await fs.access(CONFIG_PATH);
+  } catch (error) {
+    if (error.code === 'ENOENT') {
+      throw Object.assign(new Error('Конфиг ещё не создан.'), { code: 'config_not_found' });
+    }
+    throw error;
+  }
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const name = `.client-config.${stamp}.json`;
+  const target = path.join(path.dirname(CONFIG_PATH), name);
+  await fs.copyFile(CONFIG_PATH, target);
+  await fs.chmod(target, 0o600).catch(() => {});
+  await preserveOwner(target);
+  return { name, size: (await fs.stat(target)).size, modifiedAt: (await fs.stat(target)).mtime.toISOString() };
+}
+
+export async function restoreConfigBackup(name) {
+  if (typeof name !== 'string' || !/^\.client-config\.[A-Za-z0-9._-]+\.json$/.test(name) || name.includes('..')) {
+    throw Object.assign(new Error('Некорректное имя backup-файла.'), { code: 'invalid_backup' });
+  }
+  const file = path.join(path.dirname(CONFIG_PATH), name);
+  let parsed;
+  try {
+    parsed = JSON.parse(await fs.readFile(file, 'utf8'));
+  } catch (error) {
+    if (error.code === 'ENOENT') {
+      throw Object.assign(new Error('Backup-файл не найден.'), { code: 'backup_not_found' });
+    }
+    throw Object.assign(new Error('Backup-файл повреждён.'), { code: 'invalid_backup' });
+  }
+  return replaceConfig(parsed);
 }
 
 export function extractSpreadsheetId(value) {

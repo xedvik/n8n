@@ -26,13 +26,13 @@ Google Sheets в v0.3 может выполнять три независимы�
 7. В **Authorized redirect URIs** добавьте URL, который показывает n8n в credential, обычно:
 
 ```text
-http://localhost:5678/rest/oauth2-credential/callback
+https://<domain>/rest/oauth2-credential/callback
 ```
 
-Если n8n открывается по `http://127.0.0.1:5678`, используйте ровно:
+В едином стеке используйте публичный HTTPS callback:
 
 ```text
-http://127.0.0.1:5678/rest/oauth2-credential/callback
+https://<domain>/rest/oauth2-credential/callback
 ```
 
 Для домена:
@@ -192,7 +192,7 @@ https://docs.google.com/spreadsheets/d/<SPREADSHEET_ID>/edit
 Ручная заявка:
 
 ```bash
-curl -i -X POST http://localhost:5678/webhook/lead-intake \
+curl -i -X POST https://<domain>/webhook/lead-intake \
   -H 'Content-Type: application/json' \
   -H "X-Webhook-Secret: ${LEAD_WEBHOOK_SECRET}" \
   --data @examples/valid-lead.json

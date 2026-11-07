@@ -10,6 +10,23 @@
 
 `doctor.sh` проверяет контейнеры, readiness, конфиг, активность workflow, Header Auth, назначение credentials и параметры. Он не подменяет реальный API-тест: для реальной заявки нужен `--integration-test`.
 
+## `/setup/` не открывается
+
+Если Caddy или Wizard не стартуют, проверьте цепочку healthcheck:
+
+```bash
+docker compose ps
+docker compose logs --tail=100 n8n wizard caddy
+```
+
+Wizard зависит от healthy `n8n`, а Caddy — от healthy `wizard`. При проблеме с n8n сначала устраните её, затем:
+
+```bash
+docker compose up -d
+```
+
+После запуска откройте `https://<domain>/setup/`. Если порт 80/443 занят, освободите его и перезапустите Caddy.
+
 ## HTTP-ответы
 
 | Ответ | Что означает | Что проверить |
@@ -77,7 +94,7 @@
 - Redirect URI должен точно совпадать, включая `http/https`, порт и path:
 
 ```text
-http://localhost:5678/rest/oauth2-credential/callback
+https://<domain>/rest/oauth2-credential/callback
 ```
 
 - В Google Cloud включены **Google Sheets API** и **Google Drive API**.

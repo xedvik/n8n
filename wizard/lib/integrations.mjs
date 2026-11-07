@@ -174,10 +174,10 @@ export async function testStoredCredential(api, credentialId) {
   };
 }
 
-async function fetchJson(url, options, timeout = 15_000) {
+async function fetchJson(url, options, timeout = 15_000, fetchImpl = fetch) {
   let response;
   try {
-    response = await fetch(url, { ...options, signal: AbortSignal.timeout(timeout) });
+    response = await fetchImpl(url, { ...options, signal: AbortSignal.timeout(timeout) });
   } catch (error) {
     return {
       ok: false,
@@ -328,13 +328,17 @@ export async function testIntegration(kind, values = {}) {
   throw Object.assign(new Error(`Неизвестная интеграция: ${kind}`), { code: 'validation_error' });
 }
 
-export async function googleAccessToken(account) {
+export async function googleAccessToken(
+  account,
+  scope = 'https://www.googleapis.com/auth/spreadsheets.readonly',
+  fetchImpl = fetch,
+) {
   const now = Math.floor(Date.now() / 1000);
   const header = Buffer.from(JSON.stringify({ alg: 'RS256', typ: 'JWT' })).toString('base64url');
   const claim = Buffer.from(
     JSON.stringify({
       iss: account.client_email,
-      scope: 'https://www.googleapis.com/auth/spreadsheets.readonly',
+      scope,
       aud: 'https://oauth2.googleapis.com/token',
       iat: now,
       exp: now + 3600,
@@ -354,14 +358,231 @@ export async function googleAccessToken(account) {
       grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
       assertion: `${unsigned}.${assertion}`,
     }),
-  });
+  }, 15_000, fetchImpl);
   if (!result.ok || !result.payload?.access_token) {
     return {
       ok: false,
+      status: result.status,
       message: result.status === 400 ? 'Google отклонил ключ сервисного аккаунта.' : 'Не удалось получить Google access token.',
     };
   }
   return { ok: true, accessToken: result.payload.access_token };
+}
+
+const SHEETS_API_BASE = 'https://sheets.googleapis.com/v4/spreadsheets';
+const SHEETS_SCOPE = 'https://www.googleapis.com/auth/spreadsheets';
+
+function spreadsheetIdFromInput(input) {
+  if (typeof input !== 'string') return '';
+  const value = input.trim();
+  const match = value.match(/\/spreadsheets\/d\/([a-zA-Z0-9_-]+)/);
+  return match ? match[1] : value;
+}
+
+function normalizeProvisionSheets(sheets) {
+  if (!Array.isArray(sheets) || sheets.length === 0) {
+    throw Object.assign(new Error('sheets: укажите хотя бы одну вкладку'), { code: 'validation_error' });
+  }
+  if (sheets.length > 200) {
+    throw Object.assign(new Error('sheets: не более 200 вкладок'), { code: 'validation_error' });
+  }
+  const names = new Set();
+  return sheets.map((sheet, index) => {
+    if (!sheet || typeof sheet !== 'object' || Array.isArray(sheet)) {
+      throw Object.assign(new Error(`sheets[${index}]: вкладка должна быть объектом`), {
+        code: 'validation_error',
+      });
+    }
+    const name = requireText(sheet.name, `sheets[${index}].name`);
+    if (name.length > 100) {
+      throw Object.assign(new Error(`sheets[${index}].name: не более 100 символов`), {
+        code: 'validation_error',
+      });
+    }
+    if (names.has(name)) {
+      throw Object.assign(new Error(`sheets: вкладка «${name}» указана дважды`), {
+        code: 'validation_error',
+      });
+    }
+    names.add(name);
+    if (!Array.isArray(sheet.headers) || sheet.headers.length === 0) {
+      throw Object.assign(new Error(`sheets[${index}].headers: укажите хотя бы один заголовок`), {
+        code: 'validation_error',
+      });
+    }
+    const headers = sheet.headers.map((header, headerIndex) => {
+      const text = requireText(header, `sheets[${index}].headers[${headerIndex}]`);
+      if (text.length > 200) {
+        throw Object.assign(
+          new Error(`sheets[${index}].headers[${headerIndex}]: не более 200 символов`),
+          { code: 'validation_error' },
+        );
+      }
+      return text;
+    });
+    return { name, headers };
+  });
+}
+
+function sheetsApiError(status, { auth = false, notFound = false } = {}) {
+  let message;
+  if (auth) {
+    message =
+      'Google отклонил доступ. Проверьте, что сервисный аккаунт имеет доступ к таблице и Google Sheets API включён.';
+  } else if (notFound) {
+    message = 'Таблица не найдена. Проверьте spreadsheetId и доступ сервисного аккаунта.';
+  } else {
+    message = `Google Sheets вернул HTTP ${status || '—'}. Попробуйте позже.`;
+  }
+  return Object.assign(new Error(message), {
+    code: auth ? 'google_auth_error' : 'google_api_error',
+    status,
+  });
+}
+
+function assertSheetsResponse(result, options = {}) {
+  if (result.ok) return result;
+  throw sheetsApiError(result.status, {
+    auth: [401, 403].includes(result.status),
+    notFound: options.notFound && result.status === 404,
+  });
+}
+
+async function putSheetHeaders({ spreadsheetId, sheet, token, fetchImpl }) {
+  const range = encodeURIComponent(`${sheet.name}!A1`);
+  const result = await fetchJson(
+    `${SHEETS_API_BASE}/${encodeURIComponent(spreadsheetId)}/values/${range}?valueInputOption=RAW`,
+    {
+      method: 'PUT',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: 'application/json',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ values: [sheet.headers] }),
+    },
+    15_000,
+    fetchImpl,
+  );
+  assertSheetsResponse(result);
+}
+
+export async function googleSheetsProvision({
+  serviceAccount,
+  spreadsheetId,
+  title,
+  sheets,
+  fetchImpl = fetch,
+  accessToken,
+  scope = SHEETS_SCOPE,
+} = {}) {
+  const account = parseServiceAccount(serviceAccount);
+  const requestedSheets = normalizeProvisionSheets(sheets);
+  const requestedNames = requestedSheets.map((sheet) => sheet.name);
+  const normalizedId = spreadsheetIdFromInput(spreadsheetId);
+  const spreadsheetTitle =
+    typeof title === 'string' && title.trim() ? title.trim() : 'CRM Automation Kit';
+
+  let token = typeof accessToken === 'string' ? accessToken.trim() : '';
+  if (!token) {
+    const tokenResult = await googleAccessToken(account, scope, fetchImpl);
+    if (!tokenResult.ok) {
+      const status = tokenResult.status;
+      const authFailure = !status || status === 400 || status === 401 || status === 403;
+      throw Object.assign(
+        new Error(tokenResult.message || 'Не удалось получить Google access token.'),
+        { code: authFailure ? 'google_auth_error' : 'google_api_error', status },
+      );
+    }
+    token = tokenResult.accessToken;
+  }
+
+  const authHeaders = {
+    Authorization: `Bearer ${token}`,
+    Accept: 'application/json',
+  };
+
+  if (!normalizedId) {
+    const created = await fetchJson(
+      SHEETS_API_BASE,
+      {
+        method: 'POST',
+        headers: { ...authHeaders, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          properties: { title: spreadsheetTitle },
+          sheets: requestedSheets.map((sheet) => ({ properties: { title: sheet.name } })),
+        }),
+      },
+      15_000,
+      fetchImpl,
+    );
+    assertSheetsResponse(created);
+    const id = created.payload?.spreadsheetId;
+    if (!id) {
+      throw Object.assign(new Error('Google не вернул идентификатор созданной таблицы.'), {
+        code: 'google_api_error',
+        status: created.status,
+      });
+    }
+    for (const sheet of requestedSheets) {
+      await putSheetHeaders({ spreadsheetId: id, sheet, token, fetchImpl });
+    }
+    return {
+      ok: true,
+      spreadsheetId: id,
+      spreadsheetUrl:
+        created.payload?.spreadsheetUrl || `https://docs.google.com/spreadsheets/d/${id}/edit`,
+      title: created.payload?.properties?.title || spreadsheetTitle,
+      sheets: requestedNames,
+      created: true,
+    };
+  }
+
+  const id = normalizedId;
+  const meta = await fetchJson(
+    `${SHEETS_API_BASE}/${encodeURIComponent(id)}?fields=properties.title,sheets.properties.title`,
+    { headers: authHeaders },
+    15_000,
+    fetchImpl,
+  );
+  assertSheetsResponse(meta, { notFound: true });
+
+  const existingNames = (meta.payload?.sheets || [])
+    .map((sheet) => sheet.properties?.title)
+    .filter(Boolean);
+  const existingSet = new Set(existingNames);
+  const missing = requestedSheets.filter((sheet) => !existingSet.has(sheet.name));
+
+  if (missing.length) {
+    const batch = await fetchJson(
+      `${SHEETS_API_BASE}/${encodeURIComponent(id)}:batchUpdate`,
+      {
+        method: 'POST',
+        headers: { ...authHeaders, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          requests: missing.map((sheet) => ({ addSheet: { properties: { title: sheet.name } } })),
+        }),
+      },
+      15_000,
+      fetchImpl,
+    );
+    assertSheetsResponse(batch);
+  }
+
+  for (const sheet of requestedSheets) {
+    await putSheetHeaders({ spreadsheetId: id, sheet, token, fetchImpl });
+  }
+
+  return {
+    ok: true,
+    spreadsheetId: id,
+    spreadsheetUrl: `https://docs.google.com/spreadsheets/d/${id}/edit`,
+    title:
+      meta.payload?.properties?.title ||
+      (typeof title === 'string' && title.trim() ? title.trim() : null),
+    sheets: requestedNames,
+    created: false,
+  };
 }
 
 export function n8nCredentialsUrl(baseUrl) {

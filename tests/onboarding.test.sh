@@ -49,6 +49,10 @@ assert config["crm"]["googleSheets"]["spreadsheetId"] == "sheet-onboarding-test"
 print("PASS: setup-client rerun preserved existing settings")
 PY
 
-bash scripts/doctor.sh > "$TMP_DIR/doctor.log" 2>&1
-grep -q 'RESULT: PASS' "$TMP_DIR/doctor.log"
-echo "PASS: doctor.sh reports PASS"
+if docker compose ps --status running --services 2>/dev/null | grep -qx wizard; then
+  docker compose exec -T wizard bash -lc 'cd /app && BASE_URL=http://n8n:5678 ./scripts/doctor.sh' > "$TMP_DIR/doctor.log" 2>&1
+  grep -q 'RESULT: PASS' "$TMP_DIR/doctor.log"
+  echo "PASS: doctor.sh reports PASS through the wizard container"
+else
+  echo "SKIP: doctor.sh needs the unified stack (docker compose wizard service)"
+fi

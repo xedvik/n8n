@@ -1,0 +1,15 @@
+.git
+.env
+config/client.json
+config/.client-config.*
+wizard-data
+node_modules
+.omo
+.playwright-cli
+*.log
+tests
+docs
+README.md
+examples
+workflows
+db

@@ -6,18 +6,19 @@ import test from 'node:test';
 
 const ROOT = path.resolve(new URL('..', import.meta.url).pathname);
 const CADDYFILE = path.join(ROOT, 'Caddyfile');
-const SERVER_COMPOSE = path.join(ROOT, 'docker-compose.server.yml');
-const BASE_COMPOSE = path.join(ROOT, 'docker-compose.yml');
+const COMPOSE = path.join(ROOT, 'docker-compose.yml');
+const OLD_COMPOSE = path.join(ROOT, 'docker-compose.server.yml');
 const INSTALLER = path.join(ROOT, 'scripts/install-server.sh');
+const OLD_START = path.join(ROOT, 'scripts/start-wizard.sh');
+const DOCKERFILE = path.join(ROOT, 'wizard/Dockerfile');
 const ENV_EXAMPLE = path.join(ROOT, '.env.example');
-const GITIGNORE = path.join(ROOT, '.gitignore');
 const SERVER_DOC = path.join(ROOT, 'docs/SERVER.md');
+const WIZARD_DOC = path.join(ROOT, 'docs/WIZARD.md');
 const README = path.join(ROOT, 'README.md');
 
 const HAS_DOCKER_COMPOSE = spawnSync('docker', ['compose', 'version'], {
   encoding: 'utf8',
 }).status === 0;
-
 const HAS_SHELLCHECK = spawnSync('shellcheck', ['--version'], {
   encoding: 'utf8',
 }).status === 0;
@@ -30,125 +31,121 @@ function assertContains(source, needle, label) {
   assert.ok(source.includes(needle), `${label} must contain: ${needle}`);
 }
 
-test('Caddyfile serves n8n at root and the wizard under /setup', async () => {
+test('Caddy is the single ingress and routes / to n8n and /setup/ to wizard', async () => {
   const caddy = await text(CADDYFILE);
 
-  assertContains(caddy, '{$CRM_DOMAIN}', 'Caddyfile site address');
-  assertContains(caddy, '{$ACME_EMAIL}', 'Caddyfile ACME email');
-  assertContains(caddy, 'encode zstd gzip', 'Caddyfile compression');
-  assertContains(caddy, 'redir /setup /setup/ 308', 'Caddyfile setup redirect');
-  assertContains(caddy, 'handle_path /setup/*', 'Caddyfile setup route');
-  assertContains(caddy, 'reverse_proxy 127.0.0.1:{$WIZARD_PORT:8787}', 'Caddyfile wizard upstream');
-  assertContains(caddy, 'reverse_proxy 127.0.0.1:{$N8N_PORT:5678}', 'Caddyfile n8n upstream');
-  assertContains(caddy, 'Strict-Transport-Security', 'Caddyfile HSTS');
-  assertContains(caddy, 'X-Content-Type-Options', 'Caddyfile nosniff');
-  assertContains(caddy, 'Referrer-Policy', 'Caddyfile referrer policy');
-
-  assert.match(caddy, /handle\s*\{[\s\S]*reverse_proxy 127\.0\.0\.1:\{\$N8N_PORT:5678\}[\s\S]*\}/);
+  assertContains(caddy, '{$CRM_DOMAIN}', 'Caddy site address');
+  assertContains(caddy, '{$ACME_EMAIL}', 'Caddy ACME email');
+  assertContains(caddy, 'redir /setup /setup/ 308', 'setup redirect');
+  assertContains(caddy, 'handle_path /setup/*', 'setup route');
+  assertContains(caddy, 'reverse_proxy wizard:8787', 'wizard upstream DNS');
+  assertContains(caddy, 'reverse_proxy n8n:5678', 'n8n upstream DNS');
+  assertContains(caddy, 'Strict-Transport-Security', 'HSTS');
+  assertContains(caddy, 'X-Content-Type-Options', 'nosniff');
+  assert.equal(caddy.includes('127.0.0.1'), false, 'Caddy must use Compose DNS, not loopback');
+  assert.equal(caddy.includes('network_mode'), false, 'Caddy must not rely on host networking');
   assert.equal(caddy.includes('2019'), false, 'Caddy admin endpoint must not be configured');
 });
 
-test('server compose adds host-networked Caddy without publishing PostgreSQL', async () => {
-  const compose = await text(SERVER_COMPOSE);
+test('one Compose stack contains Caddy, n8n, PostgreSQL and Wizard; only Caddy publishes ports', async () => {
+  const compose = await text(COMPOSE);
 
-  assertContains(compose, 'caddy:2.10-alpine', 'pinned Caddy image');
-  assertContains(compose, 'network_mode: host', 'Caddy host networking');
-  assertContains(compose, 'restart: unless-stopped', 'Caddy restart policy');
-  assertContains(compose, 'condition: service_healthy', 'Caddy depends_on n8n healthy');
-  assertContains(compose, 'CRM_DOMAIN:', 'Caddy CRM_DOMAIN env');
-  assertContains(compose, 'ACME_EMAIL:', 'Caddy ACME_EMAIL env');
-  assertContains(compose, './Caddyfile:/etc/caddy/Caddyfile:ro', 'Caddyfile mount');
-  assertContains(compose, 'caddy_data:/data', 'Caddy data volume');
-  assertContains(compose, 'caddy_config:/config', 'Caddy config volume');
-  assertContains(compose, '127.0.0.1:${N8N_PORT:-5678}:5678', 'loopback n8n publish');
-
-  assert.equal(compose.includes('postgres:'), false, 'server compose must not redefine postgres');
-  assert.equal(compose.includes('5432'), false, 'server compose must not publish PostgreSQL');
+  for (const service of ['postgres:', 'n8n:', 'wizard:', 'caddy:']) {
+    assertContains(compose, `  ${service}`, `compose service ${service}`);
+  }
+  assertContains(compose, 'dockerfile: wizard/Dockerfile', 'wizard image build');
+  assertContains(compose, 'restart: unless-stopped', 'restart policy');
+  assertContains(compose, 'condition: service_healthy', 'health dependency');
+  assertContains(compose, 'expose:\n      - "5678"', 'n8n internal expose');
+  assertContains(compose, 'expose:\n      - "8787"', 'wizard internal expose');
+  assertContains(compose, '    ports:\n      - "80:80"\n      - "443:443"', 'Caddy ports');
+  assertContains(compose, '/var/run/docker.sock:/var/run/docker.sock', 'wizard operations socket');
+  assertContains(compose, 'WIZARD_SERVER_MODE: "1"', 'server auth mode');
+  assertContains(compose, 'WIZARD_ALLOWED_HOSTS:', 'proxy host allowlist');
+  assertContains(compose, 'WIZARD_COOKIE_SECURE: "1"', 'secure cookie');
+  assertContains(compose, 'N8N_API_URL: http://n8n:5678', 'internal n8n API');
+  assertContains(compose, 'N8N_PUBLIC_URL: https://${CRM_DOMAIN', 'public URL');
+  assertContains(compose, 'caddy_data:', 'Caddy data volume');
+  assert.equal(compose.includes('network_mode: host'), false, 'no host networking');
+  assert.equal(compose.includes('N8N_BIND_ADDRESS'), false, 'no n8n host bind');
 });
 
-test('base compose carries editor URL and proxy hops defaults', async () => {
-  const compose = await text(BASE_COMPOSE);
-  assertContains(compose, 'N8N_EDITOR_BASE_URL:', 'base compose editor URL');
-  assertContains(compose, 'N8N_PROXY_HOPS:', 'base compose proxy hops');
+test('Wizard image contains only built-in runtime and Docker/Compose helpers', async () => {
+  const dockerfile = await text(DOCKERFILE);
+  assertContains(dockerfile, 'FROM node:22-alpine', 'Node 22 base');
+  for (const pkg of ['bash', 'coreutils', 'curl', 'docker-cli', 'docker-cli-compose', 'python3']) {
+    assertContains(dockerfile, pkg, `wizard image package ${pkg}`);
+  }
+  assertContains(dockerfile, 'CMD ["node", "wizard/server.mjs"]', 'wizard start command');
+  assertContains(dockerfile, 'EXPOSE 8787', 'wizard internal port');
 });
 
-test('installer generates secrets, installs systemd, and issues a one-time token', async () => {
+test('installer deploys the same unified stack and requires no host Node/systemd', async () => {
   const installer = await text(INSTALLER);
   const stat = await fs.stat(INSTALLER);
-
-  assert.ok((stat.mode & 0o111) !== 0, 'installer must be executable');
-  assertContains(installer, 'set -euo pipefail', 'installer strict mode');
-  assertContains(installer, 'openssl rand -hex 32', 'installer secret generation');
-  assertContains(installer, 'POSTGRES_PASSWORD', 'installer DB secret');
-  assertContains(installer, 'N8N_ENCRYPTION_KEY', 'installer n8n encryption key');
-  assertContains(installer, 'LEAD_WEBHOOK_SECRET', 'installer webhook secret');
-  assertContains(installer, 'WIZARD_SECRET_KEY', 'installer wizard secret');
-  assertContains(installer, '/etc/systemd/system/crm-wizard.service', 'installer unit path');
-  assertContains(installer, 'Restart=always', 'installer unit restart policy');
-  assertContains(installer, 'systemctl enable --now', 'installer enables unit');
-  assertContains(installer, 'SUDO_USER', 'installer derives run user');
-  assertContains(installer, 'bootstrap-token', 'installer token path');
-  assertContains(installer, 'auth.json', 'installer auth check');
-  assertContains(installer, 'chmod 600', 'installer env permissions');
-  assertContains(installer, 'install -d -m 700', 'installer data permissions');
-  assertContains(installer, 'https://${DOMAIN}/setup/?token=', 'installer first-run URL');
-  assertContains(installer, './scripts/migrate.sh', 'installer migrations');
-  assertContains(installer, './scripts/import-workflow.sh', 'installer workflow import');
-  assertContains(installer, 'WIZARD_ALLOWED_HOSTS', 'installer allowed hosts');
-  assertContains(installer, 'https://${DOMAIN}/', 'installer public URLs');
-  assertContains(installer, 'curl -fsS "http://127.0.0.1:${WIZARD_PORT_VALUE}/api/health"', 'installer wizard health check');
+  assert.ok((stat.mode & 0o111) !== 0, 'installer executable');
+  assertContains(installer, 'set -euo pipefail', 'strict mode');
+  assertContains(installer, 'openssl rand -hex 32', 'secret generation');
+  for (const key of ['POSTGRES_PASSWORD', 'N8N_ENCRYPTION_KEY', 'LEAD_WEBHOOK_SECRET', 'WIZARD_SECRET_KEY']) {
+    assertContains(installer, key, `installer secret ${key}`);
+  }
+  assertContains(installer, 'bootstrap-token', 'bootstrap token');
+  assertContains(installer, 'docker compose up -d --build', 'unified stack deploy');
+  assertContains(installer, 'docker compose exec -T wizard', 'wizard health/workflow path');
+  assertContains(installer, './scripts/migrate.sh', 'migrations');
+  assertContains(installer, 'import-workflow.sh', 'workflow import');
+  assertContains(installer, 'https://${DOMAIN}/setup/?token=', 'first-run URL');
+  for (const forbidden of ['systemctl', 'crm-wizard.service', 'command -v node']) {
+    assert.equal(installer.includes(forbidden), false, `installer must not contain ${forbidden}`);
+  }
+  assert.equal(installer.includes('docker-compose.server.yml'), false, 'installer must not use overlay');
 });
 
-test('.env.example contains server and wizard keys; wizard-data is ignored', async () => {
+test('old local/server split artifacts are removed', async () => {
+  await assert.rejects(fs.access(OLD_COMPOSE), (error) => error.code === 'ENOENT');
+  await assert.rejects(fs.access(OLD_START), (error) => error.code === 'ENOENT');
+});
+
+test('.env.example describes the unified stack, not local/server modes', async () => {
   const env = await text(ENV_EXAMPLE);
-  const ignore = await text(GITIGNORE);
-  const keys = [
+  for (const key of [
+    'CRM_DOMAIN',
+    'ACME_EMAIL',
     'POSTGRES_PASSWORD',
     'N8N_ENCRYPTION_KEY',
     'LEAD_WEBHOOK_SECRET',
     'WIZARD_SECRET_KEY',
-    'CRM_DOMAIN',
-    'ACME_EMAIL',
-    'N8N_EDITOR_BASE_URL',
-    'N8N_PROXY_HOPS',
-    'N8N_API_URL',
-    'N8N_PUBLIC_URL',
-    'WIZARD_SERVER_MODE',
-    'WIZARD_HOST',
-    'WIZARD_PORT',
+    'WIZARD_SERVER_MODE=1',
+    'WIZARD_HOST=0.0.0.0',
     'WIZARD_ALLOWED_HOSTS',
-    'WIZARD_COOKIE_SECURE',
-    'WIZARD_COOKIE_PATH',
-    'WIZARD_DATA_DIR',
-  ];
-
-  for (const key of keys) {
-    assert.match(env, new RegExp(`^${key}=`, 'm'), `.env.example must define ${key}`);
+    'WIZARD_COOKIE_SECURE=1',
+    'WIZARD_COOKIE_PATH=/setup',
+    'WIZARD_DATA_DIR=/data',
+    'N8N_API_URL=http://n8n:5678',
+    'N8N_PUBLIC_URL',
+    'BASE_URL=http://n8n:5678',
+  ]) {
+    assertContains(env, key, `.env.example ${key}`);
   }
-  assert.match(ignore, /^wizard-data\/$/m, '.gitignore must ignore wizard-data/');
+  assert.equal(env.includes('WIZARD_SERVER_MODE=0'), false, 'no local mode switch');
+  assert.equal(env.includes('N8N_BIND_ADDRESS'), false, 'no host n8n binding');
 });
 
-test('server documentation exists and is linked from the README', async () => {
-  const doc = await text(SERVER_DOC);
+test('documentation describes one browser-first deployment and no CLI setup step', async () => {
+  const serverDoc = await text(SERVER_DOC);
+  const wizardDoc = await text(WIZARD_DOC);
   const readme = await text(README);
 
-  for (const heading of [
-    '## Установка',
-    '## Первый запуск',
-    '## DNS и TLS',
-    '## OAuth callback URL',
-    '## Webhook URL',
-    '## Firewall',
-    '## Резервное копирование',
-    '## Обновление',
-    '## Откат',
-  ]) {
-    assertContains(doc, heading, `SERVER.md heading ${heading}`);
+  for (const heading of ['## Установка', '## Первый запуск', '## DNS и TLS', '## Webhook URL', '## Обновление', '## Откат']) {
+    assertContains(serverDoc, heading, `SERVER.md heading ${heading}`);
   }
-  assertContains(doc, 'https://<domain>/setup/', 'SERVER.md setup URL');
-  assertContains(doc, 'https://<domain>/rest/oauth2-credential/callback', 'SERVER.md OAuth callback');
-  assertContains(doc, 'https://<domain>/webhook/lead-intake', 'SERVER.md webhook URL');
-  assertContains(readme, 'docs/SERVER.md', 'README link to SERVER.md');
+  assertContains(serverDoc, 'https://<domain>/setup/', 'setup URL');
+  assertContains(serverDoc, 'https://<domain>/webhook/lead-intake', 'webhook URL');
+  assertContains(serverDoc, 'Caddy', 'Caddy');
+  assertContains(wizardDoc, 'https://<domain>/setup/', 'wizard setup URL');
+  assertContains(readme, 'docs/SERVER.md', 'README server link');
+  assertContains(readme, 'docker compose up -d --build', 'README unified start');
+  assert.equal(serverDoc.includes('systemd'), false, 'docs must not describe systemd wizard');
 });
 
 test('installer passes bash syntax check', () => {
@@ -161,34 +158,27 @@ test('installer passes shellcheck when available', { skip: !HAS_SHELLCHECK }, ()
   assert.equal(result.status, 0, result.stdout + result.stderr);
 });
 
-test('merged compose config is valid', { skip: !HAS_DOCKER_COMPOSE }, () => {
-  const result = spawnSync(
-    'docker',
-    [
-      'compose',
-      '-f',
-      'docker-compose.yml',
-      '-f',
-      'docker-compose.server.yml',
-      'config',
-    ],
-    {
-      cwd: ROOT,
-      encoding: 'utf8',
-      env: {
-        ...process.env,
-        POSTGRES_PASSWORD: 'test-password',
-        N8N_ENCRYPTION_KEY: 'test-encryption-key',
-        CRM_DOMAIN: 'example.test',
-        ACME_EMAIL: 'admin@example.test',
-      },
-    },
-  );
-
+test('unified Compose config is valid and exposes only 80/443', { skip: !HAS_DOCKER_COMPOSE }, () => {
+  const env = {
+    ...process.env,
+    CRM_DOMAIN: 'example.test',
+    ACME_EMAIL: 'admin@example.test',
+    POSTGRES_PASSWORD: 'test-password',
+    N8N_ENCRYPTION_KEY: 'test-encryption-key',
+    WIZARD_SECRET_KEY: 'test-wizard-secret',
+    LEAD_WEBHOOK_SECRET: 'test-webhook-secret',
+  };
+  const result = spawnSync('docker', ['compose', 'config'], {
+    cwd: ROOT,
+    encoding: 'utf8',
+    env,
+  });
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /caddy:/);
-  assert.match(result.stdout, /network_mode: host/);
-  assert.match(result.stdout, /host_ip: 127\.0\.0\.1/);
-  assert.match(result.stdout, /target: 5678/);
-  assert.match(result.stdout, /published: "5678"/);
+  assert.match(result.stdout, /wizard:/);
+  assert.match(result.stdout, /published: "80"/);
+  assert.match(result.stdout, /published: "443"/);
+  assert.equal(result.stdout.includes('published: "5678"'), false, 'n8n must not publish 5678');
+  assert.equal(result.stdout.includes('published: "8787"'), false, 'wizard must not publish 8787');
+  assert.equal(result.stdout.includes('published: "5432"'), false, 'postgres must not publish 5432');
 });

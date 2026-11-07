@@ -1,13 +1,12 @@
-# Настройка CRM Automation Kit v0.4.1
+# Настройка CRM Automation Kit v0.5
 
-Руководство от чистого окружения до первой обработанной заявки. Для настройки через браузер используйте [веб-мастер](WIZARD.md); этот документ описывает ручной путь и внутренние детали. Обязательные шаги отмечены, необязательные интеграции можно пропускать. v0.4 требует PostgreSQL state store; для существующего Docker volume примените миграции.
+Руководство от чистого окружения до первой обработанной заявки. Для настройки через браузер используйте [веб-мастер](WIZARD.md); этот документ описывает ручной путь и внутренние детали. Обязательные шаги отмечены, необязательные интеграции можно пропускать. v0.5 требует PostgreSQL state store; для существующего Docker volume примените миграции.
 
 ## 1. Требования
 
 - Docker с Compose v2.
-- Свободный локальный порт `5678`.
-- `python3` на хосте для `setup-client.sh` и `doctor.sh`.
-- Node.js 22 на хосте — для веб-мастера. Ручные скрипты используют Node внутри контейнера n8n, если его нет на хосте.
+- Docker-сервер с доступными портами `80/443` и DNS-записью домена.
+- Node.js и `python3` на хосте не требуются: мастер и служебные скрипты работают внутри контейнера Wizard.
 - Для HubSpot — аккаунт HubSpot и private app access token (Service Key).
 - Для Google Sheets — Google-аккаунт и Google Cloud project.
 - Для Telegram — аккаунт Telegram.
@@ -30,7 +29,7 @@ LEAD_CONFIG_FILE=./config/client.json
 `N8N_ENCRYPTION_KEY` нельзя менять после сохранения credentials: n8n не расшифрует их. Сохраните ключ в менеджере секретов.
 
 ```bash
-docker compose up -d
+docker compose up -d --build
 docker compose ps
 ```
 
@@ -40,13 +39,13 @@ docker compose ps
 ./scripts/migrate.sh
 ```
 
-Дождитесь статуса `healthy` у обоих контейнеров. UI: <http://localhost:5678>. При первом открытии создайте owner-аккаунт.
+Дождитесь статуса `healthy` у контейнеров. UI: `https://<domain>/`. При первом открытии создайте owner-аккаунт.
 
-Если n8n открывается по `127.0.0.1`, используйте этот же host в OAuth redirect URI. Не смешивайте `localhost` и `127.0.0.1` — иначе Google OAuth вернёт `Unauthorized` или ошибку redirect.
+Для OAuth redirect используйте публичный HTTPS-адрес `https://<domain>/rest/oauth2-credential/callback`; не смешивайте разные имена хоста.
 
 ## 3. Создание конфигурации клиента
 
-Быстрый путь: `./scripts/start-wizard.sh` → `http://127.0.0.1:8787`. Ручной путь ниже оставлен для отладки и нестандартных окружений.
+Основной путь: единый Compose-стек, мастер доступен по `https://<domain>/setup/`. Ручные скрипты ниже оставлены только для разработки и аварийной диагностики.
 
 ```bash
 ./scripts/setup-client.sh
@@ -188,7 +187,7 @@ PostgreSQL credential создаётся в n8n как **Postgres** с теми 
 Ручная проверка:
 
 ```bash
-curl -i -X POST http://localhost:5678/webhook/lead-intake \
+curl -i -X POST https://<domain>/webhook/lead-intake \
   -H 'Content-Type: application/json' \
   -H "X-Webhook-Secret: ${LEAD_WEBHOOK_SECRET}" \
   --data @examples/valid-lead.json

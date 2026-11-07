@@ -33,9 +33,14 @@ const state = {
     clientSecret: '', test: null,
   },
   telegram: { token: '', chatId: '', test: null },
+  mapping: { name: 'name', email: 'email', phone: 'phone', source: 'source', message: 'message', externalId: 'external_id' },
+  idempotency: { enabled: true, retentionDays: 30, withoutKeyPolicy: 'process_new' },
+  retry: { maxAttempts: 5, baseDelaySeconds: 30, maxDelaySeconds: 3600, processingTimeoutSeconds: 300 },
   refs: { headerAuth: null, postgres: null, google: null, hubspot: null, telegram: null },
   doctor: null,
   workflow: null,
+  management: { services: null, summary: null, operations: [], backups: [], loading: false, loaded: false, error: null },
+  googleProvision: null,
   error: null,
   busy: false,
   manual: false,
@@ -144,13 +149,16 @@ function needsGoogle() {
 function steps() {
   const result = [
     { id: 'overview', title: 'Обзор', hint: 'Текущее состояние' },
+    { id: 'address', title: 'Адрес', hint: 'Публичный URL и webhook' },
     { id: 'client', title: 'Клиент', hint: 'Название и время' },
     { id: 'integrations', title: 'Интеграции', hint: 'CRM, журнал, уведомления' },
   ];
   if (state.crmProvider === 'hubspot') result.push({ id: 'hubspot', title: 'HubSpot', hint: 'Service Key' });
   if (needsGoogle()) result.push({ id: 'google', title: 'Google Sheets', hint: 'Таблица и доступ' });
   if (state.notificationsEnabled) result.push({ id: 'telegram', title: 'Telegram', hint: 'Бот и чат' });
+  result.push({ id: 'advanced', title: 'Дополнительно', hint: 'Маппинг, retry, идемпотентность' });
   result.push({ id: 'review', title: 'Проверка', hint: 'Сохранить и проверить' });
+  result.push({ id: 'manage', title: 'Управление', hint: 'Операции, backup, сервисы' });
   return result;
 }
 
@@ -213,6 +221,9 @@ function applyBootstrap(data) {
   state.google.journalSheet = config.journal?.googleSheets?.sheetName || 'Journal';
   state.google.errorsSheet = config.errors?.googleSheets?.sheetName || 'Errors';
   state.telegram.chatId = usable(config.notifications?.telegram?.chatId);
+  state.mapping = { ...state.mapping, ...(config.mapping || {}) };
+  state.idempotency = { ...state.idempotency, ...(config.idempotency || {}) };
+  state.retry = { ...state.retry, ...(config.retry || {}) };
 
   for (const [key, value] of Object.entries(data.credentials || {})) {
     if (value?.id) {
@@ -270,11 +281,14 @@ function renderError() {
 
 function renderStepContent(step) {
   if (step === 'overview') return renderOverview();
+  if (step === 'address') return renderAddress();
   if (step === 'client') return renderClient();
   if (step === 'integrations') return renderIntegrations();
   if (step === 'hubspot') return renderHubspot();
   if (step === 'google') return renderGoogle();
   if (step === 'telegram') return renderTelegram();
+  if (step === 'advanced') return renderAdvanced();
+  if (step === 'manage') return renderManage();
   return renderReview();
 }
 
@@ -284,7 +298,7 @@ function renderOverview() {
   const keyOk = data?.n8n?.apiKeyConfigured;
   return `
     <h2>${data?.hasConfig ? 'Настройка уже существует' : 'Добро пожаловать в CRM Automation Kit'}</h2>
-    <p class="lead">${data?.hasConfig ? `Найден конфиг клиента «${escapeHtml(data.config?.clientName || 'без названия')}». Можно изменить настройки, не теряя текущие credentials и workflow.` : 'Проведём настройку по шагам: клиент, интеграции, credentials и проверка. Все данные остаются на этом компьютере.'}</p>
+    <p class="lead">${data?.hasConfig ? `Найден конфиг клиента «${escapeHtml(data.config?.clientName || 'без названия')}». Можно изменить настройки, не теряя текущие credentials и workflow.` : 'Проведём настройку по шагам: клиент, интеграции, credentials и проверка. Все данные остаются в вашем контуре.'}</p>
     ${renderError()}
     ${(data?.warnings || []).map((warning) => `<div class="notice notice-warn">${escapeHtml(warning)}</div>`).join('')}
     <div class="status-grid">
@@ -304,7 +318,7 @@ function renderOverview() {
         <button type="button" class="btn btn-primary" data-action="connect-n8n">Подключить n8n</button>
       </div>
       <span class="hint">Без подключения продолжить настройку нельзя.</span>
-    </div>` : `<div class="notice notice-info" style="margin-top:16px"><strong>Автоматическое создание credentials выключено</strong>Создайте API key в n8n: <a href="${escapeHtml(n8nPublicUrl())}/settings/api" target="_blank" rel="noopener">Settings → API</a>, затем перезапустите мастер с <code class="inline-code">N8N_API_KEY=... ./scripts/start-wizard.sh</code>. Конфиг можно сохранить и без ключа.</div>`}
+    </div>` : `<div class="notice notice-info" style="margin-top:16px"><strong>Автоматическое создание credentials выключено</strong>Создайте API key в n8n: <a href="${escapeHtml(n8nPublicUrl())}/settings/api" target="_blank" rel="noopener">Settings → API</a>. Без ключа credentials нельзя создать автоматически.</div>`}
     ${data?.n8n?.apiKeyConfigured && data.n8n.workflowExists === false ? `<div class="notice notice-warn" style="margin-top:16px"><strong>Workflow ещё не установлен</strong>Импортируйте v0.4 workflow в n8n, затем назначьте credentials на шаге проверки.<br><button type="button" class="btn btn-secondary btn-small" data-action="install-workflow" style="margin-top:10px">Установить workflow</button></div>` : ''}
   `;
 }
@@ -482,8 +496,10 @@ function renderGoogle() {
       <div class="notice notice-warn" style="margin-top:12px">Создайте credential в n8n и нажмите Connect. Redirect URI: <span class="code"><code>${escapeHtml(n8nPublicUrl())}/rest/oauth2-credential/callback</code></span></div>`}
     <div class="inline" style="margin-top:16px">
       <button type="button" class="btn btn-secondary" data-action="test-google">Проверить таблицу</button>
+      ${mode === 'service_account' ? '<button type="button" class="btn btn-primary" data-action="provision-google">Создать таблицу и заголовки</button>' : ''}
       <a class="btn btn-ghost btn-small" href="https://console.cloud.google.com/apis/library/sheets.googleapis.com" target="_blank" rel="noopener">Включить Sheets API</a>
     </div>
+    ${state.googleProvision ? `<div class="notice notice-success" style="margin-top:12px"><strong>${state.googleProvision.created ? 'Таблица создана' : 'Таблица обновлена'}</strong>${escapeHtml(state.googleProvision.spreadsheetUrl || '')}<br>Откройте таблицу → Share → добавьте <code class="inline-code">${escapeHtml(email || 'email сервисного аккаунта')}</code> с правами Editor.</div>` : ''}
     <div class="notice notice-info" style="margin-top:16px">
       <strong>Заголовки первой строки</strong>
       <div class="code"><code id="headers-leads">Created At | External ID | Name | First Name | Last Name | Email | Phone | Source | Message | Request ID</code><button type="button" class="copy-btn" data-copy="Created At | External ID | Name | First Name | Last Name | Email | Phone | Source | Message | Request ID">Копировать</button></div>
@@ -523,6 +539,166 @@ function summaryRow(label, value) {
   return `<div class="summary-row"><span>${escapeHtml(label)}</span><span>${escapeHtml(value || '—')}</span></div>`;
 }
 
+function renderAddress() {
+  const setup = state.boot?.setup || {};
+  const publicUrl = setup.publicUrl || n8nPublicUrl();
+  return `
+    <h2>Адрес приложения</h2>
+    <p class="lead">Один публичный адрес обслуживает n8n, webhook, OAuth callback и мастер. Значения ниже определены текущим HTTPS-входом Caddy; домен и TLS задаются при развёртывании стека.</p>
+    ${renderError()}
+    <div class="grid two">
+      <div class="field">
+        <span class="field-label">Публичный адрес</span>
+        <div class="code"><code>${escapeHtml(publicUrl)}</code><button type="button" class="copy-btn" data-copy="${escapeHtml(publicUrl)}">Копировать</button></div>
+        <span class="hint">Откройте n8n по этому адресу. Мастер доступен по <code class="inline-code">/setup/</code>.</span>
+      </div>
+      <div class="field">
+        <span class="field-label">Webhook заявок</span>
+        <div class="code"><code>${escapeHtml(setup.webhookUrl || `${publicUrl}/webhook/lead-intake`)}</code><button type="button" class="copy-btn" data-copy="${escapeHtml(setup.webhookUrl || `${publicUrl}/webhook/lead-intake`)}">Копировать</button></div>
+        <span class="hint">Передавайте этот URL в форму/интеграцию источника заявок. Header Auth обязателен.</span>
+      </div>
+      <div class="field">
+        <span class="field-label">OAuth callback</span>
+        <div class="code"><code>${escapeHtml(setup.oauthCallbackUrl || `${publicUrl}/rest/oauth2-credential/callback`)}</code><button type="button" class="copy-btn" data-copy="${escapeHtml(setup.oauthCallbackUrl || `${publicUrl}/rest/oauth2-credential/callback`)}">Копировать</button></div>
+        <span class="hint">Укажите этот URL в OAuth-приложении Google/HubSpot, если делаете собственную OAuth-интеграцию.</span>
+      </div>
+      <div class="field">
+        <span class="field-label">Проверка</span>
+        <div class="inline">
+          <button type="button" class="btn btn-secondary" data-action="refresh-address">Проверить доступность</button>
+          <a class="btn btn-secondary" href="${escapeHtml(publicUrl)}/" target="_blank" rel="noopener">Открыть n8n</a>
+        </div>
+        <span class="hint">Проверка обновит статус n8n и workflow без изменения настроек.</span>
+      </div>
+    </div>
+  `;
+}
+
+function renderAdvanced() {
+  const mapping = state.mapping;
+  const idem = state.idempotency;
+  const retry = state.retry;
+  const mappingFields = [
+    ['name', 'Имя', 'name'],
+    ['email', 'Email', 'email'],
+    ['phone', 'Телефон', 'phone'],
+    ['source', 'Источник', 'source'],
+    ['message', 'Сообщение', 'message'],
+    ['externalId', 'External ID', 'external_id'],
+  ].map(([key, label, placeholder]) => `
+    <div class="field"><label for="map-${key}">${label}</label><input id="map-${key}" data-model="mapping.${key}" placeholder="${placeholder}"></div>`).join('');
+  return `
+    <h2>Маппинг и поведение</h2>
+    <p class="lead">Эти настройки определяют, какие поля приходят из формы, как работает идемпотентность и сколько раз workflow повторяет временно неуспешные операции.</p>
+    ${renderError()}
+    <h3>Поля входной заявки</h3>
+    <div class="grid three">${mappingFields}</div>
+    <p class="hint">Значения — имена полей JSON, которые присылает источник. Для вложенных полей используйте путь через точку.</p>
+    <div class="divider"></div>
+    <h3>Идемпотентность</h3>
+    <div class="grid three">
+      <div class="field"><label for="idem-enabled">Включена</label><label class="switch"><input id="idem-enabled" type="checkbox" data-model="idempotency.enabled" data-rerender="1"><span></span></label></div>
+      <div class="field"><label for="idem-retention">Хранить, дней</label><input id="idem-retention" type="number" min="1" max="3650" data-model="idempotency.retentionDays"></div>
+      <div class="field"><label for="idem-policy">Без ключа</label><select id="idem-policy" data-model="idempotency.withoutKeyPolicy"><option value="process_new">Обрабатывать как новую</option></select></div>
+    </div>
+    <div class="divider"></div>
+    <h3>Retry</h3>
+    <div class="grid four">
+      <div class="field"><label for="retry-max">Максимум попыток</label><input id="retry-max" type="number" min="1" max="20" data-model="retry.maxAttempts"></div>
+      <div class="field"><label for="retry-base">Базовая задержка, сек</label><input id="retry-base" type="number" min="1" max="3600" data-model="retry.baseDelaySeconds"></div>
+      <div class="field"><label for="retry-maxdelay">Максимальная задержка, сек</label><input id="retry-maxdelay" type="number" min="1" max="86400" data-model="retry.maxDelaySeconds"></div>
+      <div class="field"><label for="retry-timeout">Timeout processing, сек</label><input id="retry-timeout" type="number" min="30" max="86400" data-model="retry.processingTimeoutSeconds"></div>
+    </div>
+    <div class="notice notice-info" style="margin-top:16px"><strong>Как это работает</strong>Повторный запрос с тем же external_id/Idempotency-Key не создаёт дубль. Временные ошибки CRM/Telegram/Sheets повторяются по расписанию; подтверждённые стадии не выполняются заново.</div>
+  `;
+}
+
+function operationRow(operation) {
+  const id = escapeHtml(operation.id || '');
+  const status = escapeHtml(operation.status || 'unknown');
+  const updated = escapeHtml(operation.updatedAt || '—');
+  const source = escapeHtml(operation.source || '—');
+  const retryable = ['failed', 'retry_scheduled', 'needs_reconciliation', 'pending'].includes(operation.status);
+  return `<tr>
+    <td><code>${id}</code></td>
+    <td><span class="badge">${status}</span></td>
+    <td>${source}</td>
+    <td>${updated}</td>
+    <td>${escapeHtml(operation.lastError || '—')}</td>
+    <td>${retryable ? `<button type="button" class="btn btn-small btn-secondary" data-action="retry-operation" data-id="${id}">Повторить</button>` : '—'}</td>
+  </tr>`;
+}
+
+function renderManage() {
+  const data = state.management;
+  const services = data.services || {};
+  const summary = data.summary || {};
+  const status = (ok) => (ok ? 'configured' : 'error');
+  return `
+    <h2>Управление</h2>
+    <p class="lead">Проверка сервисов, состояние state machine, ручной retry и backup конфигурации. Все действия выполняются через авторизованный /setup/.</p>
+    ${renderError()}
+    ${data.error ? `<div class="notice notice-warn">${escapeHtml(data.error)}</div>` : ''}
+    <div class="status-grid">
+      ${statusCard('Caddy', status(services.caddy), services.caddy ? 'HTTPS ingress работает' : 'Не удалось проверить')}
+      ${statusCard('n8n', status(services.n8n), services.n8n ? 'Контейнер запущен' : 'Не удалось проверить')}
+      ${statusCard('PostgreSQL', status(services.postgres), services.postgres ? 'Контейнер запущен' : 'Не удалось проверить')}
+      ${statusCard('Wizard', status(services.wizard), services.wizard ? 'Контейнер запущен' : 'Не удалось проверить')}
+    </div>
+    <div class="divider"></div>
+    <div class="grid three">
+      <div class="status-card"><h4>Всего операций</h4><p>${escapeHtml(String(summary.total ?? '—'))}</p></div>
+      <div class="status-card"><h4>Нужна сверка</h4><p>${escapeHtml(String(summary.needsReconciliation ?? '—'))}</p></div>
+      <div class="status-card"><h4>Ждут recovery</h4><p>${escapeHtml(String(summary.dueForRecovery ?? '—'))}</p></div>
+    </div>
+    <div class="row" style="margin-top:18px">
+      <h3 style="margin:0">Последние операции</h3>
+      <button type="button" class="btn btn-secondary btn-small" data-action="refresh-manage">Обновить</button>
+    </div>
+    <div class="table-wrap" style="margin-top:10px">
+      <table class="data-table">
+        <thead><tr><th>ID</th><th>Статус</th><th>Источник</th><th>Обновлено</th><th>Ошибка</th><th></th></tr></thead>
+        <tbody>${(data.operations || []).map(operationRow).join('') || '<tr><td colspan="6">Операций пока нет.</td></tr>'}</tbody>
+      </table>
+    </div>
+    <div class="divider"></div>
+    <h3>Backup конфигурации</h3>
+    <div class="inline">
+      <select id="backup-select" class="select grow"><option value="">Выберите backup</option>${(data.backups || []).map((backup) => `<option value="${escapeHtml(backup.name)}">${escapeHtml(backup.name)}</option>`).join('')}</select>
+      <button type="button" class="btn btn-secondary" data-action="create-backup">Создать backup</button>
+      <button type="button" class="btn btn-danger" data-action="restore-backup">Восстановить</button>
+      <button type="button" class="btn btn-secondary" data-action="doctor">Проверить doctor</button>
+    </div>
+    ${data.loading ? '<p class="hint">Загружаю состояние…</p>' : ''}
+    ${state.doctor ? renderDoctor(state.doctor) : ''}
+  `;
+}
+
+async function refreshManagement() {
+  state.management.loading = true;
+  state.management.error = null;
+  render();
+  const safe = async (promise) => {
+    try { return await promise; } catch (error) { return { __error: errorMessage(error) }; }
+  };
+  const [services, summary, operations, backups] = await Promise.all([
+    safe(api('api/services')),
+    safe(api('api/operations/summary')),
+    safe(api('api/operations?limit=50')),
+    safe(api('api/config/backups')),
+  ]);
+  if (services.__error || summary.__error || operations.__error || backups.__error) {
+    state.management.error = services.__error || summary.__error || operations.__error || backups.__error;
+  }
+  state.management.services = services.__error ? null : services;
+  state.management.summary = summary.__error ? null : summary;
+  state.management.operations = operations.__error ? [] : operations.operations || [];
+  state.management.backups = backups.__error ? [] : backups.backups || [];
+  state.management.loading = false;
+  state.management.loaded = true;
+  render();
+}
+
 function renderReview() {
   const doctor = state.doctor;
   const manual = !state.boot?.n8n?.apiKeyConfigured;
@@ -538,6 +714,9 @@ function renderReview() {
       ${summaryRow('Журнал', state.journalEnabled ? `Google Sheets / ${state.google.journalSheet}` : 'выключен')}
       ${summaryRow('Telegram', state.notificationsEnabled ? state.telegram.chatId || 'нужен Chat ID' : 'выключен')}
       ${summaryRow('Журнал ошибок', state.errorsEnabled ? state.google.errorsSheet : 'выключен')}
+      ${summaryRow('Публичный адрес', state.boot?.setup?.publicUrl || '')}
+      ${summaryRow('Идемпотентность', state.idempotency.enabled ? `${state.idempotency.retentionDays} дней` : 'выключена')}
+      ${summaryRow('Retry', `${state.retry.maxAttempts} попыток, ${state.retry.baseDelaySeconds}–${state.retry.maxDelaySeconds} сек`)}
     </div>
     <div class="divider"></div>
     <div class="status-grid">
@@ -606,7 +785,7 @@ function renderActions() {
     apply.dataset.action = 'save-apply';
     apply.textContent = state.busy ? 'Применяю…' : 'Сохранить и применить';
     right.append(saveOnly, apply);
-  } else {
+  } else if (state.stepId !== 'manage') {
     const next = document.createElement('button');
     next.type = 'button';
     next.className = 'btn btn-primary';
@@ -653,6 +832,9 @@ function hydrateStep(step) {
   }
   if (step === 'integrations') {
     renderSourceChips();
+  }
+  if (step === 'manage' && !state.management.loading && !state.management.loaded) {
+    refreshManagement();
   }
   if (step === 'google') {
     const file = $('#google-sa-file');
@@ -744,6 +926,22 @@ function buildConfig() {
   }
   base.notifications = { ...(base.notifications || {}), enabled: state.notificationsEnabled, channels: state.notificationsEnabled ? ['telegram'] : [] };
   base.notifications.telegram = { ...(base.notifications.telegram || {}), chatId: state.telegram.chatId.trim() };
+  base.mapping = { ...(base.mapping || {}), ...state.mapping };
+  base.idempotency = {
+    ...(base.idempotency || {}),
+    ...state.idempotency,
+    enabled: Boolean(state.idempotency.enabled),
+    retentionDays: Number(state.idempotency.retentionDays),
+    withoutKeyPolicy: 'process_new',
+  };
+  base.retry = {
+    ...(base.retry || {}),
+    ...state.retry,
+    maxAttempts: Number(state.retry.maxAttempts),
+    baseDelaySeconds: Number(state.retry.baseDelaySeconds),
+    maxDelaySeconds: Number(state.retry.maxDelaySeconds),
+    processingTimeoutSeconds: Number(state.retry.processingTimeoutSeconds),
+  };
   return base;
 }
 
@@ -790,6 +988,21 @@ function validateStep(step) {
     if (state.boot?.n8n?.apiKeyConfigured && !state.refs.telegram && !state.telegram.token.trim()) {
       return 'Укажите bot token.';
     }
+  }
+  if (step === 'advanced') {
+    for (const [key, value] of Object.entries(state.mapping)) {
+      if (!String(value || '').trim()) return `Заполните маппинг поля «${key}».`;
+    }
+    const retention = Number(state.idempotency.retentionDays);
+    if (!Number.isInteger(retention) || retention < 1 || retention > 3650) return 'Retention должен быть целым числом от 1 до 3650 дней.';
+    const maxAttempts = Number(state.retry.maxAttempts);
+    const baseDelay = Number(state.retry.baseDelaySeconds);
+    const maxDelay = Number(state.retry.maxDelaySeconds);
+    const timeout = Number(state.retry.processingTimeoutSeconds);
+    if (!Number.isInteger(maxAttempts) || maxAttempts < 1 || maxAttempts > 20) return 'Максимум попыток: 1–20.';
+    if (!Number.isInteger(baseDelay) || baseDelay < 1 || baseDelay > 3600) return 'Базовая задержка: 1–3600 секунд.';
+    if (!Number.isInteger(maxDelay) || maxDelay < baseDelay || maxDelay > 86400) return 'Максимальная задержка должна быть не меньше базовой и не больше 86400 секунд.';
+    if (!Number.isInteger(timeout) || timeout < 30 || timeout > 86400) return 'Timeout processing: 30–86400 секунд.';
   }
   return null;
 }
@@ -909,6 +1122,7 @@ async function saveAndApply() {
       toast('Конфигурация и credentials применены к workflow.');
       const doctor = await api('api/doctor', { method: 'POST', body: { integrationTest: false }, allowNotOk: true });
       state.doctor = doctor;
+      state.boot = await api('api/bootstrap');
       toast(doctor.result === 'PASS' ? 'doctor: PASS' : 'doctor не подтвердил настройку. Смотрите отчёт.', doctor.result === 'PASS' ? '' : 'error');
     } else {
       state.manual = true;
@@ -974,7 +1188,11 @@ async function testIntegration(kind) {
       values = {
         serviceAccount: state.google.serviceAccountText,
         spreadsheetId: spreadsheetId(state.google.mainUrl),
-        sheetNames: [state.google.leadsSheet, state.google.journalSheet, state.google.errorsSheet].filter(Boolean),
+        sheetNames: [
+          ...(state.crmProvider === 'google_sheets' ? [state.google.leadsSheet] : []),
+          ...(state.journalEnabled ? [state.google.journalSheet] : []),
+          ...(state.errorsEnabled ? [state.google.errorsSheet] : []),
+        ].filter(Boolean),
       };
       state.google.test = await api('api/integrations/test', { method: 'POST', body: { kind: 'google_service_account', values } });
     }
@@ -1001,6 +1219,63 @@ async function testExisting(kind) {
     if (kind === 'google') state.google.test = result;
     toast(result.message);
   } catch (error) {
+    toast(errorMessage(error), 'error');
+  } finally {
+    state.busy = false;
+    render();
+  }
+}
+
+function googleProvisionPayload() {
+  const base = state.baseConfig || state.boot?.template || {};
+  const columns = (obj) => Object.values(obj || {}).filter(Boolean);
+  const sheets = [];
+  if (state.crmProvider === 'google_sheets') {
+    sheets.push({ name: state.google.leadsSheet.trim(), headers: columns(base.crm?.googleSheets?.columns) });
+  }
+  if (state.journalEnabled) {
+    sheets.push({ name: state.google.journalSheet.trim(), headers: columns(base.journal?.googleSheets?.columns) });
+  }
+  if (state.errorsEnabled) {
+    sheets.push({ name: state.google.errorsSheet.trim(), headers: columns(base.errors?.googleSheets?.columns) });
+  }
+  return {
+    serviceAccount: state.google.serviceAccountText,
+    spreadsheetId: spreadsheetId(state.google.mainUrl) || undefined,
+    title: `${state.company.trim() || 'CRM'} — CRM Automation Kit`,
+    sheets,
+  };
+}
+
+async function provisionGoogle() {
+  if (!state.google.serviceAccountText.trim()) {
+    toast('Вставьте JSON сервисного аккаунта.', 'error');
+    return;
+  }
+  const payload = googleProvisionPayload();
+  if (!payload.sheets.length) {
+    toast('Нет включённых таблиц для создания.', 'error');
+    return;
+  }
+  const confirmed = await confirmAction(
+    'Создать/обновить Google-таблицу?',
+    'Мастер добавит отсутствующие вкладки и перезапишет первую строку заголовков. Существующие данные строк не изменяются.',
+  );
+  if (!confirmed) return;
+  state.busy = true;
+  render();
+  try {
+    const result = await api('api/google/provision', { method: 'POST', body: payload });
+    state.googleProvision = result;
+    state.google.mainUrl = result.spreadsheetUrl;
+    state.google.test = {
+      ok: true,
+      status: 'connected',
+      message: result.created ? 'Таблица создана; проверьте доступ и заголовки.' : 'Вкладки и заголовки обновлены.',
+    };
+    toast(result.created ? 'Таблица создана.' : 'Таблица обновлена.');
+  } catch (error) {
+    state.google.test = { ok: false, message: errorMessage(error) };
     toast(errorMessage(error), 'error');
   } finally {
     state.busy = false;
@@ -1081,6 +1356,77 @@ document.addEventListener('click', async (event) => {
       target.textContent = label;
       toast(errorMessage(error), 'error');
     }
+    return;
+  }
+  if (action === 'refresh-address') {
+    try {
+      state.boot = await api('api/bootstrap');
+      toast('Статус адреса и n8n обновлён.');
+      render();
+    } catch (error) {
+      toast(errorMessage(error), 'error');
+    }
+    return;
+  }
+  if (action === 'refresh-manage') {
+    state.management.loaded = false;
+    await refreshManagement();
+    return;
+  }
+  if (action === 'retry-operation') {
+    const id = target.dataset.id;
+    const confirmed = await confirmAction(
+      'Повторить операцию?',
+      `Операция ${id} будет поставлена в очередь. Уже подтверждённые CRM/Journal стадии не будут выполнены заново.`,
+    );
+    if (!confirmed) return;
+    try {
+      await api(`api/operations/${encodeURIComponent(id)}/retry`, { method: 'POST', body: {} });
+      toast('Операция поставлена на повтор.');
+      state.management.loaded = false;
+      await refreshManagement();
+    } catch (error) {
+      toast(errorMessage(error), 'error');
+    }
+    return;
+  }
+  if (action === 'create-backup') {
+    try {
+      const result = await api('api/config/backups', { method: 'POST', body: {} });
+      toast(`Backup создан: ${result.backup?.name || ''}`);
+      state.management.loaded = false;
+      await refreshManagement();
+    } catch (error) {
+      toast(errorMessage(error), 'error');
+    }
+    return;
+  }
+  if (action === 'restore-backup') {
+    const select = $('#backup-select');
+    const name = select?.value || '';
+    if (!name) {
+      toast('Выберите backup.', 'error');
+      return;
+    }
+    const confirmed = await confirmAction(
+      'Восстановить конфигурацию?',
+      `Текущий config/client.json будет заменён backup-файлом ${name}. Текущая версия сначала сохранится как новый backup.`,
+    );
+    if (!confirmed) return;
+    try {
+      await api('api/config/restore', { method: 'POST', body: { name, confirm: true } });
+      const boot = await api('api/bootstrap');
+      applyBootstrap(boot);
+      state.management.loaded = false;
+      toast('Конфигурация восстановлена.');
+      render();
+    } catch (error) {
+      toast(errorMessage(error), 'error');
+    }
+    return;
+  }
+  if (action === 'provision-google') {
+    await provisionGoogle();
     return;
   }
   if (action === 'logout') {
@@ -1165,6 +1511,6 @@ document.addEventListener('change', (event) => {
   } catch (error) {
     const box = $('#boot-error');
     box.classList.remove('hidden');
-    box.textContent = `Не удалось загрузить мастер: ${error.message}. Проверьте, что сервер запущен через ./scripts/start-wizard.sh.`;
+    box.textContent = `Не удалось загрузить мастер: ${error.message}. Проверьте, что контейнер wizard запущен и доступен через Caddy.`;
   }
 })();
