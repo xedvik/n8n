@@ -1,4 +1,4 @@
-# CRM Automation Kit v0.3
+# CRM Automation Kit v0.4
 
 Переиспользуемый lead-intake kit для n8n: HTTP webhook → нормализация → валидация → идемпотентная операция в PostgreSQL → CRM → опциональный журнал → опциональные уведомления → HTTP-ответ.
 
@@ -25,9 +25,21 @@
 
 Стек: `docker.n8n.io/n8nio/n8n:2.46.6`, `postgres:17.11-alpine`, Docker Compose.
 
+## Веб-мастер настройки (v0.4)
+
+Для настройки клиента через браузер, без ручного редактирования конфига:
+
+```bash
+./scripts/start-wizard.sh
+```
+
+Мастер откроется на `http://127.0.0.1:8787`. Он работает только локально, не передаёт `N8N_API_KEY` в браузер и сохраняет конфиг атомарно с backup. Для автоматического создания credentials нужен n8n API key: `http://127.0.0.1:5678/settings/api` (scopes: `workflow:read`, `workflow:update`, `workflow:activate`, `credential:list`, `credential:read`, `credential:create`).
+
+Подробнее: [docs/WIZARD.md](docs/WIZARD.md).
+
 ## Быстрый старт
 
-Требования: Docker Compose и `python3` для onboarding-скриптов. `node` на хосте опционален: скрипты используют Node внутри контейнера n8n.
+Требования: Docker Compose и `python3` для onboarding-скриптов. Для веб-мастера нужен Node.js 22 на хосте; ручные скрипты используют Node внутри контейнера n8n.
 
 ```bash
 cp .env.example .env
@@ -122,6 +134,7 @@ docker compose up -d
 
 ## Документация
 
+- [Веб-мастер настройки](docs/WIZARD.md)
 - [Пошаговая настройка с нуля](docs/SETUP.md)
 - [Google Sheets](docs/integrations/google-sheets.md)
 - [Telegram](docs/integrations/telegram.md)
@@ -137,6 +150,8 @@ config/example-legacy-google-sheets.json
 config/client.json              # локальный конфиг клиента, gitignored
 db/migrations/                  # PostgreSQL schema/functions
 scripts/setup-client.sh         # интерактивный onboarding
+scripts/start-wizard.sh         # локальный веб-мастер v0.4
+wizard/                         # backend + static UI мастера
 scripts/migrate.sh              # применение миграций
 scripts/doctor.sh               # диагностика + независимый API read-back
 scripts/retry-operation.sh      # точечный ручной retry
@@ -149,7 +164,8 @@ tests/                          # unit и smoke тесты
 
 ## Безопасность и ограничения
 
-- `.env`, `config/client.json` и `config/*.local.json` не попадают в Git.
+- `.env`, `config/client.json`, `config/.client-config.*` и `config/*.local.json` не попадают в Git.
+- Веб-мастер слушает только loopback и защищает POST-запросы токеном, который меняется при каждом запуске.
 - В workflow нет credentials: их нужно назначить в n8n UI после импорта.
 - Header Auth обязателен для webhook; секрет хранится в n8n credential и локальном `.env` для тестов.
 - PII в executions ограничена retention: 7 дней / 5000 записей. Google Sheets Journal/Errors хранят PII отдельно и требуют собственной политики доступа/очистки.
