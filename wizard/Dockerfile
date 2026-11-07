@@ -12,6 +12,7 @@ RUN apk add --no-cache \
 
 WORKDIR /app
 COPY wizard ./wizard
+RUN chmod +x /app/wizard/entrypoint.sh
 
 EXPOSE 8787
-CMD ["node", "wizard/server.mjs"]
+ENTRYPOINT ["/app/wizard/entrypoint.sh"]

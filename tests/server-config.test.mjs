@@ -76,7 +76,8 @@ test('Wizard image contains only built-in runtime and Docker/Compose helpers', a
   for (const pkg of ['bash', 'coreutils', 'curl', 'docker-cli', 'docker-cli-compose', 'python3']) {
     assertContains(dockerfile, pkg, `wizard image package ${pkg}`);
   }
-  assertContains(dockerfile, 'CMD ["node", "wizard/server.mjs"]', 'wizard start command');
+  assertContains(dockerfile, 'ENTRYPOINT ["/app/wizard/entrypoint.sh"]', 'wizard entrypoint');
+  assertContains(dockerfile, 'chmod +x /app/wizard/entrypoint.sh', 'executable entrypoint');
   assertContains(dockerfile, 'EXPOSE 8787', 'wizard internal port');
 });
 

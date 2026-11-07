@@ -25,7 +25,7 @@ Wizard зависит от healthy `n8n`, а Caddy — от healthy `wizard`. П
 docker compose up -d
 ```
 
-После запуска откройте `https://<domain>/setup/`. Если порт 80/443 занят, освободите его и перезапустите Caddy.
+Первый запуск без установщика создаёт `wizard-data/bootstrap-token`; токен берётся из файла и не пишется в логи. После запуска откройте `https://<domain>/setup/?token=<token>`. Если порт 80/443 занят, освободите его и перезапустите Caddy.
 
 ## HTTP-ответы
 

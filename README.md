@@ -50,6 +50,8 @@ cp .env.example .env
 docker compose up -d --build
 ```
 
+При первом старте без installer-скрипта Wizard сам создаст `wizard-data/bootstrap-token`. Возьмите токен из этого файла и откройте `https://<domain>/setup/?token=<token>`; значение токена в логи не пишется.
+
 Установщик — единственная точка развёртывания. Он:
 
 1. создаёт `.env` и генерирует `POSTGRES_PASSWORD`, `N8N_ENCRYPTION_KEY`, `LEAD_WEBHOOK_SECRET`, `WIZARD_SECRET_KEY`;

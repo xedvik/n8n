@@ -16,7 +16,7 @@ Caddy снимает префикс `/setup` и проксирует запро�
 sudo ./scripts/install-server.sh crm.example.com admin@example.com
 ```
 
-2. Откройте first-run URL из вывода установщика:
+2. Откройте first-run URL из вывода установщика или, при прямом Compose-запуске, возьмите токен из `wizard-data/bootstrap-token`:
    `https://<domain>/setup/?token=<одноразовый-токен>`.
 3. Создайте единственного администратора. Пароль — не короче 12 символов.
 4. Подключите n8n API key в браузере.

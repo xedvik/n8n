@@ -54,7 +54,7 @@ sudo ./scripts/install-server.sh crm.example.com admin@example.com
 7. Ждёт готовности n8n и Wizard, применяет миграции и импортирует workflow, только если его ещё нет.
 8. Печатает first-run URL.
 
-Повторный запуск сохраняет `.env`, базу, конфиг клиента, credentials, workflow и токен.
+При прямом `docker compose up -d --build` без установщика Wizard сам создаёт `wizard-data/bootstrap-token` при первом старте; токен берётся из файла и не пишется в логи. Повторный запуск сохраняет `.env`, базу, конфиг клиента, credentials, workflow и токен.
 
 ## Первый запуск
 
