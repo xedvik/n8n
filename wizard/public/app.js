@@ -52,6 +52,8 @@ const state = {
   previousConfigHash: null,
   applyStatus: null,
   configHash: null,
+  doctorConfigHash: null,
+  testLeadConfigHash: null,
   error: null,
   busy: false,
   manual: false,
@@ -155,6 +157,59 @@ function canonicalJson(value) {
   return JSON.stringify(value);
 }
 
+function fnv1a64(value) {
+  let hash = 0xcbf29ce484222325n;
+  const bytes = new TextEncoder().encode(String(value));
+  for (const byte of bytes) {
+    hash ^= BigInt(byte);
+    hash = BigInt.asUintN(64, hash * 0x100000001b3n);
+  }
+  return hash.toString(16).padStart(16, '0');
+}
+
+function integrationScope(kind) {
+  const hash = (value) => (value ? fnv1a64(value) : null);
+  let relevant;
+  if (kind === 'hubspot') {
+    relevant = {
+      kind,
+      provider: state.crmProvider,
+      mode: state.hubspot.mode,
+      ref: state.refs.hubspot?.id || null,
+      token: hash(state.hubspot.appToken),
+      clientId: hash(state.hubspot.clientId),
+      clientSecret: hash(state.hubspot.clientSecret),
+    };
+  } else if (kind === 'google') {
+    relevant = {
+      kind,
+      provider: state.crmProvider,
+      journal: state.journalEnabled,
+      errors: state.errorsEnabled,
+      mode: state.google.mode,
+      ref: state.refs.google?.id || null,
+      serviceAccount: hash(state.google.serviceAccountText),
+      clientId: hash(state.google.clientId),
+      clientSecret: hash(state.google.clientSecret),
+      main: spreadsheetId(state.google.mainUrl),
+      journalId: spreadsheetId(state.google.journalUrl),
+      errorsId: spreadsheetId(state.google.errorsUrl),
+      leadsSheet: state.google.leadsSheet.trim(),
+      journalSheet: state.google.journalSheet.trim(),
+      errorsSheet: state.google.errorsSheet.trim(),
+    };
+  } else {
+    relevant = {
+      kind,
+      enabled: state.notificationsEnabled,
+      ref: state.refs.telegram?.id || null,
+      token: hash(state.telegram.token),
+      chatId: state.telegram.chatId.trim(),
+    };
+  }
+  return fnv1a64(canonicalJson(relevant));
+}
+
 async function draftConfigHash() {
   try {
     const config = buildConfig();
@@ -167,15 +222,40 @@ async function draftConfigHash() {
   }
 }
 
-function markDirty() {
+function markDirty(kind = null) {
   state.dirty = true;
   state.testLead = null;
+  state.testLeadConfigHash = null;
   state.doctor = null;
+  state.doctorConfigHash = null;
   state.applyStatus = null;
-  state.hubspot.test = null;
-  state.google.test = null;
-  state.telegram.test = null;
+  if (kind === 'hubspot' || kind === 'google' || kind === 'telegram') {
+    state[kind].test = null;
+    updateIntegrationTabChecks();
+  }
   updateTopStatus();
+}
+
+function updateIntegrationTabChecks() {
+  for (const button of $$('[data-integration-tab]')) {
+    const kind = button.dataset.integrationTab;
+    let mark = button.querySelector('.tab-check');
+    if (integrationStageState(kind) === 'verified') {
+      if (!mark) {
+        mark = document.createElement('span');
+        mark.className = 'tab-check';
+        mark.textContent = '✓';
+        button.append(mark);
+      }
+    } else if (mark) {
+      mark.remove();
+    }
+  }
+}
+
+function invalidateE2e() {
+  state.testLead = null;
+  state.testLeadConfigHash = null;
 }
 
 function historicalTest(record) {
@@ -188,6 +268,7 @@ function historicalTest(record) {
     ok: true,
     status: record.status || 'connected',
     historical: true,
+    scope: record.scope || null,
     checkedAt: record.checkedAt || null,
     message: `Последняя проверка прошла: ${label}. Текущая доступность не проверена — запустите проверку снова.`,
   };
@@ -305,12 +386,21 @@ function applyBootstrap(data, { preserveLiveVerifications = false } = {}) {
   const verifications = data.verifications || {};
   const liveFor = (kind) => {
     const test = liveTests[kind];
-    if (!test || test.historical || !test.configHash || test.configHash !== state.configHash) return null;
+    if (!test || test.historical || test.scope !== integrationScope(kind)) return null;
     return test;
   };
-  state.hubspot.test = liveFor('hubspot') || historicalTest(verifications.hubspot);
-  state.google.test = liveFor('google') || historicalTest(verifications.google);
-  state.telegram.test = liveFor('telegram') || historicalTest(verifications.telegram);
+  const historicalFor = (kind) => {
+    const source = verifications[kind];
+    const candidates = Array.isArray(source) ? source : (source ? [source] : []);
+    const scope = integrationScope(kind);
+    const record = candidates
+      .filter((item) => item?.scope === scope)
+      .sort((a, b) => (Date.parse(b.checkedAt) || 0) - (Date.parse(a.checkedAt) || 0))[0];
+    return record?.ok ? historicalTest(record) : null;
+  };
+  state.hubspot.test = liveFor('hubspot') || historicalFor('hubspot');
+  state.google.test = liveFor('google') || historicalFor('google');
+  state.telegram.test = liveFor('telegram') || historicalFor('telegram');
   if (!isKnownStep(state.stepId)) state.stepId = 'start';
 }
 
@@ -410,11 +500,24 @@ function stageStateLabel(value) {
   }[value] || 'Не начато');
 }
 
-function integrationStageState(kind) {
+function requiredIntegrationKinds() {
+  const required = [];
+  if (state.crmProvider === 'hubspot') required.push('hubspot');
+  if (needsGoogle()) required.push('google');
+  if (state.notificationsEnabled) required.push('telegram');
+  return required;
+}
+
+function integrationTestMatches(kind) {
+  const test = kind === 'hubspot' ? state.hubspot.test : kind === 'google' ? state.google.test : state.telegram.test;
+  return test && test.scope === integrationScope(kind) ? test : null;
+}
+
+function integrationRuntimeState(kind) {
   if (kind === 'hubspot' && state.crmProvider !== 'hubspot') return 'skipped';
   if (kind === 'google' && !needsGoogle()) return 'skipped';
   if (kind === 'telegram' && !state.notificationsEnabled) return 'skipped';
-  const test = kind === 'hubspot' ? state.hubspot.test : kind === 'google' ? state.google.test : state.telegram.test;
+  const test = integrationTestMatches(kind);
   const telegramChatVerified = kind !== 'telegram' || test?.details?.chatVerified === true;
   if (test?.ok === true && !test.historical && telegramChatVerified) return 'verified';
   if (test?.ok === false && !test.historical) return 'error';
@@ -422,23 +525,63 @@ function integrationStageState(kind) {
   return 'action_required';
 }
 
+function e2eIsCurrent() {
+  return !state.dirty
+    && state.testLead?.result === 'PASS'
+    && Boolean(state.testLeadConfigHash)
+    && state.testLeadConfigHash === state.boot?.configHash;
+}
+
+function e2eCovers(kind) {
+  return e2eIsCurrent() && requiredIntegrationKinds().includes(kind);
+}
+
+function integrationStageState(kind) {
+  if (e2eCovers(kind)) return 'verified';
+  return integrationRuntimeState(kind);
+}
+
 function integrationStatusNote(kind, fallback) {
-  const test = kind === 'hubspot' ? state.hubspot.test : kind === 'google' ? state.google.test : state.telegram.test;
+  if (e2eCovers(kind)) return 'Проверено сквозным тестом.';
+  const test = integrationTestMatches(kind);
   if (test?.historical) return 'Последняя проверка прошла; требуется повторная проверка.';
-  if (test?.ok === true) return 'Проверено сейчас.';
+  if (test?.ok === true && (kind !== 'telegram' || test.details?.chatVerified === true)) return 'Проверено сейчас.';
   if (test?.ok === false) return 'Проверка не прошла.';
-  if (state.refs[kind === 'hubspot' ? 'hubspot' : kind === 'google' ? 'google' : 'telegram']) {
-    return 'Доступ сохранён; требуется повторная проверка.';
-  }
+  if (state.refs[kind]) return 'Доступ сохранён; требуется повторная проверка.';
   return fallback;
 }
 
-function allRequiredIntegrationsVerified() {
-  const required = [];
-  if (state.crmProvider === 'hubspot') required.push('hubspot');
-  if (needsGoogle()) required.push('google');
-  if (state.notificationsEnabled) required.push('telegram');
-  return required.every((kind) => integrationStageState(kind) === 'verified' || integrationStageState(kind) === 'skipped');
+function readinessState() {
+  const currentConfigHash = state.boot?.configHash || null;
+  const doctorCurrent = !state.dirty && state.doctor?.result === 'PASS'
+    && (!state.doctorConfigHash || state.doctorConfigHash === currentConfigHash);
+  const e2eCurrent = e2eIsCurrent();
+  const required = requiredIntegrationKinds();
+  const services = required.map((kind) => ({ kind, state: integrationRuntimeState(kind) }));
+  const missing = [];
+  if (state.dirty) {
+    missing.push({ key: 'dirty', text: 'Сохраните и примените изменения перед финальной проверкой.' });
+  }
+  if (!doctorCurrent) {
+    missing.push({ key: 'doctor', text: 'Нажмите «Проверить систему» после применения конфигурации.' });
+  }
+  if (!e2eCurrent) {
+    for (const service of services) {
+      if (service.state !== 'verified' && service.state !== 'skipped') {
+        const label = service.kind === 'hubspot' ? 'HubSpot' : service.kind === 'google' ? 'Google Sheets' : 'Telegram';
+        missing.push({ key: `integration-${service.kind}`, text: `Проверьте ${label} на этапе «Подключение интеграций».` });
+      }
+    }
+    missing.push({ key: 'e2e', text: 'Отправьте тестовую заявку и дождитесь подтверждения записей.' });
+  }
+  return {
+    ready: doctorCurrent && e2eCurrent,
+    doctorCurrent,
+    e2eCurrent,
+    required,
+    services,
+    missing,
+  };
 }
 
 function stageStatus(id) {
@@ -454,10 +597,7 @@ function stageStatus(id) {
     return boot.hasConfig ? 'configured' : 'action_required';
   }
   if (id === 'integrations') {
-    const required = [];
-    if (state.crmProvider === 'hubspot') required.push('hubspot');
-    if (needsGoogle()) required.push('google');
-    if (state.notificationsEnabled) required.push('telegram');
+    const required = requiredIntegrationKinds();
     if (!required.length) return boot.hasConfig ? 'configured' : 'action_required';
     const statuses = required.map(integrationStageState);
     if (statuses.includes('error')) return 'error';
@@ -466,14 +606,14 @@ function stageStatus(id) {
     return 'verified';
   }
   if (id === 'verify') {
+    const readiness = readinessState();
     if (state.doctor?.result === 'FAIL') return 'error';
-    if (state.testLead?.result === 'PASS' && state.doctor?.result === 'PASS' && allRequiredIntegrationsVerified()) return 'verified';
-    if (state.doctor?.result === 'PASS') return 'configured';
+    if (readiness.ready) return 'verified';
+    if (readiness.doctorCurrent) return 'configured';
     return 'action_required';
   }
   if (id === 'done') {
-    if (state.testLead?.result === 'PASS' && state.doctor?.result === 'PASS' && allRequiredIntegrationsVerified()) return 'verified';
-    return 'action_required';
+    return readinessState().ready ? 'verified' : 'action_required';
   }
   return 'not_started';
 }
@@ -623,12 +763,13 @@ function renderVerify() {
 }
 
 function renderDone() {
-  const doctorOk = state.doctor?.result === 'PASS';
+  const readiness = readinessState();
+  const doctorOk = readiness.doctorCurrent;
   const leadOk = state.testLead?.result === 'PASS';
   const crmOk = state.crmProvider === 'none' ? true : integrationStageState(state.crmProvider === 'hubspot' ? 'hubspot' : 'google') === 'verified';
   const sheetsOk = !needsGoogle() || integrationStageState('google') === 'verified';
   const telegramOk = !state.notificationsEnabled || integrationStageState('telegram') === 'verified';
-  const ready = doctorOk && leadOk && crmOk && sheetsOk && telegramOk;
+  const ready = readiness.ready;
   const webhook = state.boot?.setup?.webhookUrl || `${state.boot?.setup?.publicUrl || ''}/webhook/lead-intake`;
   return `
     <div class="completion-hero ${ready ? 'success' : 'warn'}">
@@ -636,10 +777,11 @@ function renderDone() {
       <div>
         <p class="eyebrow">CRM Automation Kit</p>
         <h2>${ready ? 'Система готова' : 'Нужно завершить проверку'}</h2>
-        <p class="lead">${ready ? 'Все обязательные проверки и тестовая заявка пройдены. Можно переходить к работе.' : 'Настройки сохранены, но успех не подтверждён реальным тестом.'}</p>
+        <p class="lead">${ready ? 'Все обязательные проверки и тестовая заявка пройдены. Можно переходить к работе.' : 'Готовность не подтверждена: ниже указано, какие проверки нужно выполнить.'}</p>
       </div>
     </div>
     ${renderError()}
+    ${renderReadinessNotice(readiness)}
     <div class="status-grid">
       ${statusCard('CRM', crmOk ? 'configured' : 'requires_auth', crmOk ? 'Проверено' : 'Требует проверки')}
       ${statusCard('Таблица', sheetsOk ? 'configured' : 'requires_auth', sheetsOk ? 'Проверено' : 'Требует проверки')}
@@ -663,28 +805,30 @@ function renderHubspot() {
   const status = state.hubspot.test || (state.refs.hubspot ? { status: 'configured', message: 'Доступ сохранён. Требуется повторная проверка.' } : null);
   return `
     <h3>HubSpot</h3>
-    <p class="lead">Создайте private app с доступом к контактам. Ключ доступа остаётся на сервере мастера и сохраняется в защищённом хранилище.</p>
+    <p class="lead">Создайте HubSpot Service Key с доступом к контактам. Ключ остаётся на сервере мастера и сохраняется в защищённом хранилище.</p>
     ${renderError()}
     ${status ? `<div class="notice notice-${status.ok === false || status.historical || !status.ok ? 'warn' : 'success'}">${escapeHtml(status.message || statusLabel(status.status))}</div>` : ''}
     <div class="grid two">
       <div class="field">
         <label for="hubspot-mode">Способ подключения</label>
         <select id="hubspot-mode" data-model="hubspot.mode" data-rerender="1">
-          <option value="service_key">Ключ private app (Service Key)</option>
+          <option value="service_key">Service Key (рекомендуется)</option>
           <option value="oauth2">OAuth2 (для публичных приложений)</option>
         </select>
       </div>
       <div class="field">
         <span class="field-label">Где создать</span>
-        <a class="btn btn-secondary" href="https://app.hubspot.com/settings/private-apps" target="_blank" rel="noopener">Открыть Private Apps</a>
-        <span class="hint">Development → Private apps. Скопируйте access token.</span>
+        <a class="btn btn-secondary" href="https://app.hubspot.com/" target="_blank" rel="noopener">Открыть HubSpot</a>
+        <a class="btn btn-ghost btn-small" href="https://developers.hubspot.com/docs/apps/developer-platform/build-apps/authentication/account-service-keys" target="_blank" rel="noopener">Инструкция HubSpot</a>
+        <span class="hint">Development → Keys → Service Keys. Если пункта нет: Settings → Account Management → Integrations → Service keys.</span>
       </div>
     </div>
     ${mode === 'service_key' ? `
       <div class="field" style="margin-top:16px">
-        <label for="hubspot-token">Ключ private app</label>
+        <label for="hubspot-token">Service Key</label>
         <input id="hubspot-token" type="password" data-model="hubspot.appToken" autocomplete="off" placeholder="pat-…">
         ${fieldError('hubspotToken')}
+        <span class="hint">Скопируйте значение ключа после создания. Мастер создаст credential HubSpot Service Key в n8n.</span>
       </div>` : `
       <div class="grid two" style="margin-top:16px">
         <div class="field"><label for="hubspot-client-id">Client ID</label><input id="hubspot-client-id" data-model="hubspot.clientId" autocomplete="off"></div>
@@ -692,9 +836,9 @@ function renderHubspot() {
       </div>
       <div class="notice notice-warn" style="margin-top:12px">После создания доступа откройте n8n → Доступы → HubSpot OAuth2 и нажмите «Подключить». Мастер не сможет завершить OAuth за вас.</div>`}
     <div class="notice notice-info" style="margin-top:16px">
-      <strong>Права private app</strong>
+      <strong>Права Service Key</strong>
       <div class="chips"><span class="chip">crm.objects.contacts.read</span><span class="chip">crm.objects.contacts.write</span></div>
-      <p class="small" style="margin:8px 0 0">Если используете дополнительные свойства контакта, добавьте <code>crm.schemas.contacts.read</code>.</p>
+      <p class="small" style="margin:8px 0 0">Если используете дополнительные свойства контакта, добавьте <code>crm.schemas.contacts.read</code>. <a href="https://docs.n8n.io/integrations/builtin/credentials/hubspot" target="_blank" rel="noopener">Документация n8n по HubSpot</a>.</p>
     </div>
     <div class="inline" style="margin-top:16px">
       <button type="button" class="btn btn-secondary" data-action="test-hubspot">Проверить подключение</button>
@@ -949,6 +1093,14 @@ async function refreshManagement() {
   render();
 }
 
+function renderReadinessNotice(readiness = readinessState()) {
+  if (readiness.ready) {
+    return '<div class="notice notice-success" style="margin-top:14px"><strong>Все проверки пройдены</strong>Конфигурация применена, системы доступны, тестовая заявка подтверждена.</div>';
+  }
+  const items = (readiness.missing || []).map((item) => `<li>${escapeHtml(item.text)}</li>`).join('');
+  return `<div class="notice notice-info" style="margin-top:14px"><strong>Готовность не подтверждена</strong><ul style="margin:8px 0 0;padding-left:20px">${items}</ul></div>`;
+}
+
 function renderReview() {
   const doctor = state.doctor;
   const testLead = state.testLead;
@@ -957,7 +1109,8 @@ function renderReview() {
     : integrationStageState(state.crmProvider === 'hubspot' ? 'hubspot' : 'google');
   const sheetState = !needsGoogle() ? 'unknown' : integrationStageState('google');
   const telegramState = !state.notificationsEnabled ? 'unknown' : integrationStageState('telegram');
-  const ready = doctor?.result === 'PASS' && testLead?.result === 'PASS' && allRequiredIntegrationsVerified();
+  const readiness = readinessState();
+  const ready = readiness.ready;
   return `
     <h2>Проверка и запуск</h2>
     <p class="lead">Проверьте сводку и подключения. Настройки будут сохранены, доступы — подготовлены, автоматизация — обновлена. При сбое мастер восстановит предыдущую конфигурацию.</p>
@@ -986,17 +1139,30 @@ function renderReview() {
       ${ready ? '<button type="button" class="btn btn-primary" data-action="go-done">Перейти к работе</button>' : ''}
     </div>
     ${doctor ? renderDoctor(doctor) : ''}
-    ${!ready ? '<div class="notice notice-info" style="margin-top:14px"><strong>Успех не подтверждён</strong>Зелёный статус появится только после успешной проверки системы и реальной тестовой заявки.</div>' : ''}
+    ${renderReadinessNotice(readiness)}
     ${state.workflow ? `<div class="notice notice-${state.doctor?.result === 'PASS' ? 'success' : 'warn'}" style="margin-top:14px">Автоматизация обновлена${state.doctor?.result === 'PASS' ? ' и активна' : ', но проверка не пройдена'}.</div>` : ''}
   `;
 }
 
 
 function renderDoctor(result) {
-  return `<div class="notice notice-${result.result === 'PASS' ? 'success' : 'warn'}" style="margin-top:16px">
+  const checks = Array.isArray(result.checks) ? result.checks : [];
+  const levelClass = (level) => {
+    const value = String(level || 'info').toLowerCase();
+    return ['ok', 'warn', 'fail', 'info'].includes(value) ? value : 'info';
+  };
+  const overall = result.result === 'PASS' ? 'success' : result.result === 'FAIL' ? 'error' : 'warn';
+  const reconciliation = checks.some((check) => /needs[ _]reconciliation|require[sd]? reconciliation|требуют проверки/i.test(check.message || ''));
+  return `<div class="notice notice-${overall} doctor-report" style="margin-top:16px">
     <strong>Проверка системы: ${escapeHtml(result.result)}</strong>
-    <div class="summary">${(result.checks || []).map((check) => `<div class="summary-row"><span>${escapeHtml(check.level)}</span><span>${escapeHtml(check.message)}</span></div>`).join('')}</div>
-  </div>`;
+    <div class="doctor-checks">
+      ${checks.map((check) => `<div class="doctor-check">
+        <span class="doctor-level doctor-${levelClass(check.level)}">${escapeHtml(String(check.level || 'info').toUpperCase())}</span>
+        <span>${escapeHtml(check.message || '')}</span>
+      </div>`).join('')}
+    </div>
+  </div>
+  ${reconciliation ? `<div class="notice notice-warn doctor-reconciliation"><strong>Есть операции, требующие проверки</strong><span>Они не блокируют текущую конфигурацию, но требуют внимания.</span><button type="button" class="btn btn-secondary btn-small" data-extra-step="maintenance">Открыть операции</button></div>` : ''}`;
 }
 
 function renderActions() {
@@ -1232,7 +1398,7 @@ function validateStep(step) {
     }
     if (state.boot?.n8n?.apiKeyConfigured) {
       if (state.crmProvider === 'hubspot' && !state.refs.hubspot && !state.hubspot.appToken.trim() && !(state.hubspot.clientId.trim() && state.hubspot.clientSecret.trim())) {
-        state.fieldErrors.hubspotToken = 'Укажите ключ private app или данные OAuth2.';
+        state.fieldErrors.hubspotToken = 'Укажите Service Key или данные OAuth2.';
         return state.fieldErrors.hubspotToken;
       }
       if (needsGoogle()) {
@@ -1367,7 +1533,9 @@ async function saveAndApply() {
   state.busy = true;
   state.applyStage = 'Проверка настроек';
   state.testLead = null;
+  state.testLeadConfigHash = null;
   state.doctor = null;
+  state.doctorConfigHash = null;
   state.applyStatus = null;
   state.previousRefs = refsForApi();
   state.previousConfigHash = state.boot?.configHash || null;
@@ -1433,7 +1601,9 @@ async function saveAndApply() {
         throw error;
       }
 
+      refreshLiveTestScopes();
       const currentBoot = await api('api/bootstrap');
+      state.doctorConfigHash = currentBoot.configHash;
       await persistLiveVerifications(currentBoot.configHash).catch(() => {});
       const boot = await api('api/bootstrap');
       applyBootstrap(boot, { preserveLiveVerifications: true });
@@ -1552,6 +1722,13 @@ async function saveAndApply() {
   }
 }
 
+function refreshLiveTestScopes() {
+  for (const kind of ['hubspot', 'google', 'telegram']) {
+    const test = state[kind].test;
+    if (test && test.ok === true && !test.historical) test.scope = integrationScope(kind);
+  }
+}
+
 async function persistLiveVerifications(configHash) {
   if (!configHash) return;
   const tests = {
@@ -1561,8 +1738,8 @@ async function persistLiveVerifications(configHash) {
   };
   const results = {};
   for (const [kind, test] of Object.entries(tests)) {
-    if (test?.ok === true && !test.historical && (kind !== 'telegram' || test.details?.chatVerified === true)) {
-      results[kind] = { ok: true, status: test.status || 'connected' };
+    if (test?.ok === true && !test.historical && test.scope && (kind !== 'telegram' || test.details?.chatVerified === true)) {
+      results[kind] = { ok: true, status: test.status || 'connected', scope: test.scope };
     }
   }
   if (!Object.keys(results).length) return;
@@ -1582,8 +1759,14 @@ async function runDoctor(integrationTest = false) {
       body: { integrationTest, confirm: integrationTest ? true : undefined },
       allowNotOk: true,
     });
+    const hash = state.boot?.configHash || await draftConfigHash() || null;
+    result.configHash = hash;
     state.doctor = result;
-    if (integrationTest) state.testLead = result;
+    state.doctorConfigHash = hash;
+    if (integrationTest) {
+      state.testLead = result;
+      state.testLeadConfigHash = hash;
+    }
     toast(result.result === 'PASS' ? 'Проверка системы пройдена.' : 'Проверка системы не пройдена.', result.result === 'PASS' ? '' : 'error');
   } catch (error) {
     state.error = errorMessage(error);
@@ -1597,6 +1780,7 @@ async function runDoctor(integrationTest = false) {
 async function testIntegration(kind) {
   state.error = null;
   const configHash = await draftConfigHash();
+  const scope = integrationScope(kind);
   try {
     let result;
     if (kind === 'hubspot') {
@@ -1607,17 +1791,17 @@ async function testIntegration(kind) {
       const values = { token: state.hubspot.appToken };
       result = await api('api/integrations/test', {
         method: 'POST',
-        body: { kind, values, configHash },
+        body: { kind, values, configHash, scope },
       });
-      state.hubspot.test = { ...result, configHash: result.configHash || configHash, historical: false };
+      state.hubspot.test = { ...result, scope: result.scope || scope, configHash: result.configHash || configHash, historical: false };
     }
     if (kind === 'telegram') {
       const values = { token: state.telegram.token, chatId: state.telegram.chatId };
       result = await api('api/integrations/test', {
         method: 'POST',
-        body: { kind, values, configHash },
+        body: { kind, values, configHash, scope },
       });
-      state.telegram.test = { ...result, configHash: result.configHash || configHash, historical: false };
+      state.telegram.test = { ...result, scope: result.scope || scope, configHash: result.configHash || configHash, historical: false };
       state.telegram.chats = Array.isArray(result?.details?.chats) ? result.details.chats : [];
       if (!state.telegram.chatId && state.telegram.chats.length === 1) state.telegram.chatId = state.telegram.chats[0].id;
     }
@@ -1641,23 +1825,24 @@ async function testIntegration(kind) {
       };
       result = await api('api/integrations/test', {
         method: 'POST',
-        body: { kind: 'google_service_account', values, configHash },
+        body: { kind: 'google_service_account', verificationKind: 'google', values, configHash, scope },
       });
-      state.google.test = { ...result, configHash: result.configHash || configHash, historical: false };
+      state.google.test = { ...result, scope: result.scope || scope, configHash: result.configHash || configHash, historical: false };
     }
+    if (result?.ok === false) invalidateE2e();
     toast(result?.message || 'Проверка завершена.');
   } catch (error) {
     const message = errorMessage(error);
     if (kind === 'hubspot') {
-      state.hubspot.test = { ok: false, message: /значение обязательно/.test(message) ? 'Вставьте ключ private app.' : message, configHash, historical: false };
-      if (/значение обязательно/.test(message)) state.fieldErrors.hubspotToken = 'Вставьте ключ private app.';
+      state.hubspot.test = { ok: false, message: /значение обязательно/.test(message) ? 'Вставьте Service Key.' : message, scope, configHash, historical: false };
+      if (/значение обязательно/.test(message)) state.fieldErrors.hubspotToken = 'Вставьте Service Key.';
     }
     if (kind === 'telegram') {
-      state.telegram.test = { ok: false, message: /значение обязательно/.test(message) ? 'Вставьте токен бота и выберите чат.' : message, configHash, historical: false };
+      state.telegram.test = { ok: false, message: /значение обязательно/.test(message) ? 'Вставьте токен бота и выберите чат.' : message, scope, configHash, historical: false };
       if (/значение обязательно/.test(message)) state.fieldErrors.telegramToken = 'Вставьте токен бота.';
     }
     if (kind === 'google') {
-      state.google.test = { ok: false, message, configHash, historical: false };
+      state.google.test = { ok: false, message, scope, configHash, historical: false };
       if (/spreadsheetId/.test(message)) state.fieldErrors.googleUrl = 'Вставьте ссылку на таблицу.';
     }
     toast(message, 'error');
@@ -1669,20 +1854,30 @@ async function testExisting(kind) {
   const ref = state.refs[kind === 'hubspot' ? 'hubspot' : kind];
   if (!ref?.id) return;
   const configHash = await draftConfigHash();
+  const scope = integrationScope(kind);
   state.busy = true;
   render();
   try {
     const result = await api(`api/credentials/${encodeURIComponent(ref.id)}/test`, {
       method: 'POST',
-      body: { kind, configHash },
+      body: { kind, configHash, scope },
       allowNotOk: true,
     });
-    const tested = { ...result, configHash: result.configHash || configHash, historical: false };
+    const tested = { ...result, scope: result.scope || scope, configHash: result.configHash || configHash, historical: false };
+    if (result.ok === false) invalidateE2e();
     if (kind === 'hubspot') state.hubspot.test = tested;
     if (kind === 'telegram') state.telegram.test = tested;
     if (kind === 'google') state.google.test = tested;
     toast(result.message);
   } catch (error) {
+    invalidateE2e();
+    state[kind].test = {
+      ok: false,
+      message: errorMessage(error),
+      scope,
+      configHash,
+      historical: false,
+    };
     toast(errorMessage(error), 'error');
   } finally {
     state.busy = false;
@@ -1786,18 +1981,21 @@ document.addEventListener('click', async (event) => {
     return;
   }
   if (target.dataset.crm) {
-    state.crmProvider = target.dataset.crm;
-    if (state.crmProvider === 'none') state.journalEnabled = true;
-    state.dirty = true;
-    state.testLead = null;
-    state.doctor = null;
+    const nextProvider = target.dataset.crm;
+    if (nextProvider !== state.crmProvider) {
+      state.crmProvider = nextProvider;
+      if (state.crmProvider === 'none') state.journalEnabled = true;
+      state.hubspot.test = null;
+      state.google.test = null;
+      markDirty();
+    }
     state.error = null;
     render();
     return;
   }
   if (target.dataset.removeSource !== undefined) {
     state.allowedSources.splice(Number(target.dataset.removeSource), 1);
-    state.dirty = true;
+    markDirty();
     renderSourceChips();
     return;
   }
@@ -1921,11 +2119,11 @@ document.addEventListener('click', async (event) => {
     return;
   }
   if (action === 'go-done') {
-    if (state.testLead?.result === 'PASS' && state.doctor?.result === 'PASS' && allRequiredIntegrationsVerified()) {
+    if (readinessState().ready) {
       state.stepId = 'done';
       render();
     } else {
-      toast('Сначала завершите проверки обязательных интеграций.', 'error');
+      toast('Сначала выполните недостающие проверки, указанные на экране.', 'error');
     }
     return;
   }
@@ -1940,7 +2138,7 @@ document.addEventListener('click', async (event) => {
     const value = input?.value.trim();
     if (value && !state.allowedSources.includes(value)) {
       state.allowedSources.push(value);
-      state.dirty = true;
+      markDirty();
       input.value = '';
       renderSourceChips();
     }
@@ -1978,8 +2176,10 @@ document.addEventListener('click', async (event) => {
 document.addEventListener('input', (event) => {
   const model = event.target.dataset.model;
   if (!model) return;
-  markDirty();
-  delete state.fieldErrors[model.split('.')[0]];
+  const prefix = model.split('.')[0];
+  const affected = ['hubspot', 'google', 'telegram'].includes(prefix) ? prefix : null;
+  markDirty(affected);
+  delete state.fieldErrors[prefix];
   setPath(state, model, event.target.value);
   if (model === 'google.serviceAccountText') {
     const email = (() => { try { return JSON.parse(event.target.value).client_email || ''; } catch { return ''; } })();
@@ -1991,7 +2191,15 @@ document.addEventListener('input', (event) => {
 document.addEventListener('change', (event) => {
   const model = event.target.dataset.model;
   if (!model) return;
-  markDirty();
+  const prefix = model.split('.')[0];
+  const affected = ['hubspot', 'google', 'telegram'].includes(prefix)
+    ? prefix
+    : model === 'notificationsEnabled'
+      ? 'telegram'
+      : model === 'journalEnabled' || model === 'errorsEnabled'
+        ? 'google'
+        : null;
+  markDirty(affected);
   const value = event.target.type === 'checkbox' ? event.target.checked : event.target.value;
   setPath(state, model, value);
   if (event.target.dataset.rerender) render();

@@ -108,11 +108,12 @@ if docker compose ps --status running --services 2>/dev/null | grep -qx postgres
     info "Lead operations: ${counts:-none}"
     overdue="$(docker compose exec -T postgres psql -U "$DB_USER" -d "$DB_NAME" -Atc "select count(*) from app.lead_operations where (status='retry_scheduled' and next_attempt_at <= now()) or (status='processing' and updated_at < now() - interval '5 minutes')" 2>/dev/null | tr -d '\r' || true)"
     needs="$(docker compose exec -T postgres psql -U "$DB_USER" -d "$DB_NAME" -Atc "select count(*) from app.lead_operations where status='needs_reconciliation'" 2>/dev/null | tr -d '\r' || true)"
+    needs_ids="$(docker compose exec -T postgres psql -U "$DB_USER" -d "$DB_NAME" -Atc "select coalesce(string_agg(id::text, ', '), '') from app.lead_operations where status='needs_reconciliation'" 2>/dev/null | tr -d '\r' || true)"
     if [ "${overdue:-0}" != "0" ]; then
       warn "${overdue} operation(s) are due for recovery; check Schedule Trigger executions"
     fi
     if [ "${needs:-0}" != "0" ]; then
-      warn "${needs} operation(s) require reconciliation; inspect before retrying"
+      warn "${needs} operation(s) require reconciliation: ${needs_ids:-inspect Operations}"
     fi
   else
     warn "Operation status counts unavailable until migrations are applied"

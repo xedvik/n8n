@@ -57,3 +57,18 @@ test('verification store ignores malformed hashes and kinds', async () => {
   assert.deepEqual(await listVerifications('a'.repeat(64)), {});
   assert.deepEqual(await listVerifications('not-a-hash'), {});
 });
+
+test('verification scopes are independent per integration', async () => {
+  const { listVerificationHistory } = await import('../wizard/lib/verification-store.mjs');
+  const hubspotScope = '1'.repeat(16);
+  const googleScope = '2'.repeat(16);
+  await recordVerification({ kind: 'hubspot', ok: true, status: 'connected', scope: hubspotScope });
+  await recordVerification({ kind: 'google', ok: true, status: 'connected', scope: googleScope });
+  const hubspot = await listVerifications(hubspotScope);
+  const google = await listVerifications(googleScope);
+  assert.deepEqual(Object.keys(hubspot), ['hubspot']);
+  assert.deepEqual(Object.keys(google), ['google']);
+  const history = await listVerificationHistory();
+  assert.equal(history.hubspot[0].scope, hubspotScope);
+  assert.equal(history.google[0].scope, googleScope);
+});

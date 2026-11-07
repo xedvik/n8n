@@ -8,19 +8,22 @@ HubSpot-адаптер в v0.3 использует стандартный n8n c
 
 ## 1. Создание Service Key
 
-1. В HubSpot откройте **Development → Private apps** (или Settings → Integrations → Private Apps).
-2. Создайте private app.
-3. Добавьте scopes:
+1. Войдите в HubSpot под пользователем с правами Super Admin или Developer tools.
+2. Откройте **Development → Keys → Service Keys**. Если раздела нет: **Settings → Account Management → Integrations → Service Keys**.
+3. Нажмите **Create service key** и задайте понятное имя.
+4. Добавьте scopes:
    - `crm.objects.contacts.read`
    - `crm.objects.contacts.write`
-4. Если планируете читать/проверять свойства контактов, при необходимости добавьте `crm.schemas.contacts.read`.
-5. Создайте/скопируйте access token (Service Key). Не публикуйте его.
+5. Если планируете читать/проверять свойства контактов, при необходимости добавьте `crm.schemas.contacts.read`.
+6. Создайте ключ, откройте его, нажмите **Show** и скопируйте значение. Не публикуйте его.
+
+Официальная инструкция HubSpot: [Account Service Keys](https://developers.hubspot.com/docs/apps/developer-platform/build-apps/authentication/account-service-keys).
 
 ## 2. Credential в n8n
 
 1. `Credentials → Create Credential → HubSpot Service Key`.
-2. Вставьте access token.
-3. Сохраните.
+2. Вставьте Service Key.
+3. Сохраните. В новых версиях n8n поле может называться **Service Key**, но внутренний тип credential остаётся `hubspotAppToken`.
 
 Альтернатива — `HubSpot OAuth2 API`: она поддерживается n8n, но требует OAuth app и набора scopes. В v0.3 HTTP-ноды по умолчанию настроены на `hubspotAppToken`. Если вы сознательно используете OAuth2, переключите **Credential Type** на `HubSpot OAuth2 API` во всех трёх HubSpot HTTP-нодах и назначьте OAuth2 credential. Иначе HubSpot-ветка будет падать с ошибкой credential.
 

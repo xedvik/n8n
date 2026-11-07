@@ -39,7 +39,7 @@ import {
 import { WORKFLOW_ID, applyWorkflowCredentials, installWorkflow } from './lib/workflow.mjs';
 import { createWorkflowBackup, restoreWorkflowBackup } from './lib/workflow-backup.mjs';
 import { runDoctor } from './lib/doctor.mjs';
-import { listVerifications, recordVerification } from './lib/verification-store.mjs';
+import { listVerificationHistory, recordVerification } from './lib/verification-store.mjs';
 import { createOps } from './lib/ops.mjs';
 import {
   hostAllowed,
@@ -178,7 +178,7 @@ async function bootstrap(req) {
     ok: true,
     auth: { serverMode: SERVER_MODE },
     configHash: appliedConfigHash,
-    verifications: await listVerifications(appliedConfigHash),
+    verifications: await listVerificationHistory(),
     setup: {
       ...urls,
       hasConfig: current.exists,
@@ -497,15 +497,15 @@ async function handleApi(req, res, url) {
       const body = await readBody(req, res);
       if (!body) return true;
       const result = await testStoredCredential(api, decodeURIComponent(testMatch[1]));
-      if (body.kind && body.configHash && result.ok && body.kind !== 'telegram') {
+      if (body.kind && (body.scope || body.configHash) && result.ok && body.kind !== 'telegram') {
         await recordVerification({
           kind: body.kind,
           ok: result.ok,
           status: result.status,
-          configHash: body.configHash,
+          scope: body.scope || body.configHash,
         }).catch(() => {});
       }
-      sendJson(res, 200, result);
+      sendJson(res, 200, { ...result, scope: body.scope || null });
     } catch (error) {
       const mapped = mapError(error);
       sendError(res, mapped.status, mapped.code, mapped.message);
@@ -518,17 +518,23 @@ async function handleApi(req, res, url) {
     if (!body) return true;
     try {
       const result = await testIntegration(body.kind, body.values || {});
+      const verificationKind = body.verificationKind || body.kind;
       const verificationEligible = result.ok
-        && (body.kind !== 'telegram' || result.details?.chatVerified === true);
+        && (verificationKind !== 'telegram' || result.details?.chatVerified === true);
       const verification = verificationEligible
         ? await recordVerification({
-          kind: body.kind,
+          kind: verificationKind,
           ok: result.ok,
           status: result.status,
-          configHash: body.configHash,
+          scope: body.scope || body.configHash,
         }).catch(() => null)
         : null;
-      sendJson(res, 200, { ...result, configHash: body.configHash || null, verification });
+      sendJson(res, 200, {
+        ...result,
+        scope: body.scope || null,
+        configHash: body.configHash || null,
+        verification,
+      });
     } catch (error) {
       const mapped = mapError(error);
       sendError(res, mapped.status, mapped.code, mapped.message);
@@ -547,7 +553,7 @@ async function handleApi(req, res, url) {
         kind,
         ok: result.ok === true,
         status: result.status,
-        configHash: body.configHash,
+        scope: result.scope || body.scope || body.configHash,
       }).catch(() => null);
       if (record) saved.push(kind);
     }

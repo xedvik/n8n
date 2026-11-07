@@ -53,10 +53,33 @@ test('doctor failure is treated as a failed apply and starts rollback', async ()
 
 test('timezone edits mark state dirty and clear stale verification', async () => {
   const app = await fs.readFile(path.join(ROOT, 'wizard/public/app.js'), 'utf8');
-  assert.match(app, /function markDirty\(\)/);
+  assert.match(app, /function markDirty\(kind = null\)/);
   assert.match(app, /state\.timezone = search\.value/);
   assert.match(app, /state\.applyStatus = null/);
   assert.match(app, /lastWorkflowBackup/);
+  assert.match(app, /function integrationScope\(kind\)/);
+  assert.match(app, /function readinessState\(\)/);
+  assert.match(app, /function e2eIsCurrent\(\)/);
+  assert.match(app, /function integrationScope\(kind\)/);
+});
+
+test('HubSpot onboarding uses Service Keys, not legacy private apps', async () => {
+  const app = await fs.readFile(path.join(ROOT, 'wizard/public/app.js'), 'utf8');
+  assert.equal(app.includes('settings/private-apps'), false);
+  assert.match(app, /https:\/\/app\.hubspot\.com\//);
+  assert.match(app, /account-service-keys/);
+  assert.match(app, /Service Key/);
+});
+
+test('doctor checks have distinct levels and reconciliation warning', async () => {
+  const app = await fs.readFile(path.join(ROOT, 'wizard/public/app.js'), 'utf8');
+  const styles = await fs.readFile(path.join(ROOT, 'wizard/public/styles.css'), 'utf8');
+  assert.match(app, /doctor-level doctor-/);
+  assert.match(app, /doctor-reconciliation/);
+  assert.match(styles, /\.doctor-ok/);
+  assert.match(styles, /\.doctor-warn/);
+  assert.match(styles, /\.doctor-fail/);
+  assert.match(styles, /\.doctor-info/);
 });
 
 test('summary rows can wrap long webhook URLs on mobile', async () => {
@@ -70,9 +93,12 @@ test('server persists only safe verification metadata for the applied config has
   const server = await fs.readFile(path.join(ROOT, 'wizard/server.mjs'), 'utf8');
   const store = await fs.readFile(path.join(ROOT, 'wizard/lib/verification-store.mjs'), 'utf8');
   assert.match(server, /configHash: appliedConfigHash/);
-  assert.match(server, /verifications: await listVerifications/);
+  assert.match(server, /verifications: await listVerificationHistory/);
   assert.match(server, /recordVerification/);
+  assert.match(server, /verificationKind/);
   assert.match(store, /checkedAt/);
+  assert.match(store, /scope/);
+  assert.match(store, /listVerificationHistory/);
   assert.equal(store.includes('message:'), false, 'verification store must not persist messages');
   assert.equal(store.includes('token:'), false, 'verification store must not persist tokens');
 });

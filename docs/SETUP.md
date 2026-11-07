@@ -7,7 +7,7 @@
 - Docker с Compose v2.
 - Docker-сервер с доступными портами `80/443` и DNS-записью домена.
 - Node.js и `python3` на хосте не требуются: мастер и служебные скрипты работают внутри контейнера Wizard.
-- Для HubSpot — аккаунт HubSpot и private app access token (Service Key).
+- Для HubSpot — аккаунт HubSpot и HubSpot Service Key с доступом к контактам.
 - Для Google Sheets — Google-аккаунт и Google Cloud project.
 - Для Telegram — аккаунт Telegram.
 
@@ -110,8 +110,8 @@ Google Sheets может быть:
 
 Кратко:
 
-1. Создайте HubSpot private app с scopes `crm.objects.contacts.read` и `crm.objects.contacts.write`.
-2. Скопируйте access token (Service Key) и создайте credential **HubSpot Service Key**.
+1. Создайте HubSpot Service Key: **Development → Keys → Service Keys** (или **Settings → Account Management → Integrations → Service Keys**) со scopes `crm.objects.contacts.read` и `crm.objects.contacts.write`.
+2. Скопируйте значение ключа и создайте credential **HubSpot Service Key**.
 3. В `config/client.json` выберите `crm.provider=hubspot`.
 4. Назначьте credential трём нодам:
    - `HubSpot Search Contact`;

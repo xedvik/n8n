@@ -166,9 +166,13 @@ test('workflow backup/restore and verification snapshot survive server round tri
     });
     const boot = await (await fetch(`${baseUrl}/api/bootstrap`)).json();
     assert.equal(boot.configHash, hash);
-    assert.equal(boot.verifications.hubspot.ok, true);
-    assert.equal(boot.verifications.hubspot.status, 'connected');
-    assert.equal(boot.verifications.hubspot.checkedAt !== undefined, true);
+    assert.ok(Array.isArray(boot.verifications.hubspot));
+    const currentRecord = boot.verifications.hubspot.find((item) => item.scope === hash);
+    const otherRecord = boot.verifications.hubspot.find((item) => item.scope === 'c'.repeat(64));
+    assert.equal(currentRecord.ok, true);
+    assert.equal(currentRecord.status, 'connected');
+    assert.equal(currentRecord.checkedAt !== undefined, true);
+    assert.equal(otherRecord.ok, false);
     const stored = await fs.readFile(path.join(dataDir, 'integration-verifications.json'), 'utf8');
     assert.equal(stored.includes('must-not-be-saved'), false);
   } finally {
