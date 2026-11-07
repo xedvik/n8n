@@ -34,6 +34,45 @@ test('save-and-apply has a restore point and rollback path', async () => {
   const app = await fs.readFile(path.join(ROOT, 'wizard/public/app.js'), 'utf8');
   assert.match(app, /api\/config\/backups/);
   assert.match(app, /api\/config\/restore/);
+  assert.match(app, /api\/workflow\/backups/);
+  assert.match(app, /api\/workflow\/restore/);
   assert.match(app, /Предыдущая конфигурация восстановлена/);
   assert.match(app, /workflow\/apply/);
+  assert.equal(app.includes('saveConfigOnly'), false);
+  assert.equal(app.includes("data-action=\"save-only\""), false);
+});
+
+test('doctor failure is treated as a failed apply and starts rollback', async () => {
+  const app = await fs.readFile(path.join(ROOT, 'wizard/public/app.js'), 'utf8');
+  assert.match(app, /doctor\.result !== 'PASS'/);
+  assert.match(app, /Применение отменено/);
+  assert.match(app, /Применение частично выполнено/);
+  assert.match(app, /workflowAttempted/);
+  assert.match(app, /configRestored/);
+});
+
+test('timezone edits mark state dirty and clear stale verification', async () => {
+  const app = await fs.readFile(path.join(ROOT, 'wizard/public/app.js'), 'utf8');
+  assert.match(app, /function markDirty\(\)/);
+  assert.match(app, /state\.timezone = search\.value/);
+  assert.match(app, /state\.applyStatus = null/);
+  assert.match(app, /lastWorkflowBackup/);
+});
+
+test('summary rows can wrap long webhook URLs on mobile', async () => {
+  const styles = await fs.readFile(path.join(ROOT, 'wizard/public/styles.css'), 'utf8');
+  assert.match(styles, /\.summary \{[^}]*min-width: 0/);
+  assert.match(styles, /\.summary-row \{[^}]*min-width: 0/);
+  assert.match(styles, /\.summary-row span:last-child \{[^}]*overflow-wrap: anywhere/);
+});
+
+test('server persists only safe verification metadata for the applied config hash', async () => {
+  const server = await fs.readFile(path.join(ROOT, 'wizard/server.mjs'), 'utf8');
+  const store = await fs.readFile(path.join(ROOT, 'wizard/lib/verification-store.mjs'), 'utf8');
+  assert.match(server, /configHash: appliedConfigHash/);
+  assert.match(server, /verifications: await listVerifications/);
+  assert.match(server, /recordVerification/);
+  assert.match(store, /checkedAt/);
+  assert.equal(store.includes('message:'), false, 'verification store must not persist messages');
+  assert.equal(store.includes('token:'), false, 'verification store must not persist tokens');
 });

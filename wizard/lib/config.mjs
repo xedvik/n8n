@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
@@ -235,4 +236,21 @@ export function isValidTimezone(value) {
 export function publicConfig(config) {
   // client.json is non-secret by design. Keep this boundary explicit.
   return config ? structuredClone(config) : null;
+}
+
+function canonicalJson(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  if (value && typeof value === 'object') {
+    return `{${Object.keys(value)
+      .filter((key) => value[key] !== undefined)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`)
+      .join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
+
+export function configHash(config) {
+  if (!config || typeof config !== 'object' || Array.isArray(config)) return null;
+  return crypto.createHash('sha256').update(canonicalJson(config)).digest('hex');
 }

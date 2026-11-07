@@ -47,7 +47,11 @@ const state = {
   fieldErrors: {},
   applyStage: null,
   lastBackup: null,
+  lastWorkflowBackup: null,
   previousRefs: null,
+  previousConfigHash: null,
+  applyStatus: null,
+  configHash: null,
   error: null,
   busy: false,
   manual: false,
@@ -139,6 +143,56 @@ function timezoneValid(value) {
   }
 }
 
+function canonicalJson(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  if (value && typeof value === 'object') {
+    return `{${Object.keys(value)
+      .filter((key) => value[key] !== undefined)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`)
+      .join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
+
+async function draftConfigHash() {
+  try {
+    const config = buildConfig();
+    if (!globalThis.crypto?.subtle) return null;
+    const bytes = new TextEncoder().encode(canonicalJson(config));
+    const digest = await crypto.subtle.digest('SHA-256', bytes);
+    return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+  } catch {
+    return null;
+  }
+}
+
+function markDirty() {
+  state.dirty = true;
+  state.testLead = null;
+  state.doctor = null;
+  state.applyStatus = null;
+  state.hubspot.test = null;
+  state.google.test = null;
+  state.telegram.test = null;
+  updateTopStatus();
+}
+
+function historicalTest(record) {
+  if (!record?.ok) return null;
+  const checkedAt = record.checkedAt ? new Date(record.checkedAt) : null;
+  const label = checkedAt && !Number.isNaN(checkedAt.getTime())
+    ? checkedAt.toLocaleString('ru-RU')
+    : 'время неизвестно';
+  return {
+    ok: true,
+    status: record.status || 'connected',
+    historical: true,
+    checkedAt: record.checkedAt || null,
+    message: `Последняя проверка прошла: ${label}. Текущая доступность не проверена — запустите проверку снова.`,
+  };
+}
+
 function timezoneNow(value) {
   try {
     return new Intl.DateTimeFormat('ru-RU', {
@@ -204,7 +258,10 @@ function statusCard(title, status, note = '') {
   </div>`;
 }
 
-function applyBootstrap(data) {
+function applyBootstrap(data, { preserveLiveVerifications = false } = {}) {
+  const liveTests = preserveLiveVerifications
+    ? { hubspot: state.hubspot.test, google: state.google.test, telegram: state.telegram.test }
+    : {};
   state.boot = data;
   const config = data.config || data.template || {};
   state.baseConfig = structuredClone(config);
@@ -244,7 +301,32 @@ function applyBootstrap(data) {
       };
     }
   }
+  state.configHash = data.configHash || null;
+  const verifications = data.verifications || {};
+  const liveFor = (kind) => {
+    const test = liveTests[kind];
+    if (!test || test.historical || !test.configHash || test.configHash !== state.configHash) return null;
+    return test;
+  };
+  state.hubspot.test = liveFor('hubspot') || historicalTest(verifications.hubspot);
+  state.google.test = liveFor('google') || historicalTest(verifications.google);
+  state.telegram.test = liveFor('telegram') || historicalTest(verifications.telegram);
   if (!isKnownStep(state.stepId)) state.stepId = 'start';
+}
+
+function topStatusText() {
+  const data = state.boot || {};
+  const baseStatus = data.n8n?.reachable
+    ? data.n8n.apiKeyConfigured
+      ? `n8n: ${data.n8n.workflowActive ? 'автоматизация активна' : 'автоматизация не активна'}`
+      : 'n8n: требуется подключение'
+    : 'n8n недоступен';
+  return state.dirty ? `${baseStatus} · есть несохранённые изменения` : baseStatus;
+}
+
+function updateTopStatus() {
+  const node = $('#top-status');
+  if (node) node.textContent = topStatusText();
 }
 
 function render() {
@@ -254,12 +336,7 @@ function render() {
   const extra = isExtraStep(state.stepId);
   $('#progress-bar').style.width = `${extra ? 100 : ((currentIndex + 1) / list.length) * 100}%`;
   $('#progress-label').textContent = extra ? 'Сервисный раздел' : `Этап ${currentIndex + 1} из ${list.length}`;
-  const baseStatus = state.boot?.n8n?.reachable
-    ? state.boot.n8n.apiKeyConfigured
-      ? `n8n: ${state.boot.n8n.workflowActive ? 'автоматизация активна' : 'автоматизация не активна'}`
-      : 'n8n: требуется подключение'
-    : 'n8n недоступен';
-  $('#top-status').textContent = state.dirty ? `${baseStatus} · есть несохранённые изменения` : baseStatus;
+  updateTopStatus();
 
   const logoutButton = $('#logout-btn');
   if (logoutButton) logoutButton.classList.toggle('hidden', !state.boot?.auth?.serverMode);
@@ -301,6 +378,13 @@ function renderError() {
   return `<div class="notice notice-error" role="alert"><strong>Не получилось</strong>${escapeHtml(state.error)}</div>`;
 }
 
+function renderApplyStatus() {
+  const status = state.applyStatus;
+  if (!status) return '';
+  const type = status.state === 'applied' ? 'success' : status.state === 'partial' ? 'error' : 'warn';
+  return `<div class="notice notice-${type}" role="status"><strong>${escapeHtml(status.title || '')}</strong>${escapeHtml(status.message || '')}</div>`;
+}
+
 function fieldError(name) {
   return state.fieldErrors?.[name] ? `<span class="field-error">${escapeHtml(state.fieldErrors[name])}</span>` : '';
 }
@@ -331,10 +415,22 @@ function integrationStageState(kind) {
   if (kind === 'google' && !needsGoogle()) return 'skipped';
   if (kind === 'telegram' && !state.notificationsEnabled) return 'skipped';
   const test = kind === 'hubspot' ? state.hubspot.test : kind === 'google' ? state.google.test : state.telegram.test;
-  if (test?.ok === true) return 'verified';
-  if (test?.ok === false) return 'error';
-  if (state.refs[kind]) return 'configured';
+  const telegramChatVerified = kind !== 'telegram' || test?.details?.chatVerified === true;
+  if (test?.ok === true && !test.historical && telegramChatVerified) return 'verified';
+  if (test?.ok === false && !test.historical) return 'error';
+  if (test?.historical || state.refs[kind]) return 'configured';
   return 'action_required';
+}
+
+function integrationStatusNote(kind, fallback) {
+  const test = kind === 'hubspot' ? state.hubspot.test : kind === 'google' ? state.google.test : state.telegram.test;
+  if (test?.historical) return 'Последняя проверка прошла; требуется повторная проверка.';
+  if (test?.ok === true) return 'Проверено сейчас.';
+  if (test?.ok === false) return 'Проверка не прошла.';
+  if (state.refs[kind === 'hubspot' ? 'hubspot' : kind === 'google' ? 'google' : 'telegram']) {
+    return 'Доступ сохранён; требуется повторная проверка.';
+  }
+  return fallback;
 }
 
 function allRequiredIntegrationsVerified() {
@@ -564,12 +660,12 @@ function renderDone() {
 
 function renderHubspot() {
   const mode = state.hubspot.mode;
-  const status = state.hubspot.test || (state.refs.hubspot ? { status: 'configured', message: 'Сохранённый доступ уже подключён.' } : null);
+  const status = state.hubspot.test || (state.refs.hubspot ? { status: 'configured', message: 'Доступ сохранён. Требуется повторная проверка.' } : null);
   return `
     <h3>HubSpot</h3>
     <p class="lead">Создайте private app с доступом к контактам. Ключ доступа остаётся на сервере мастера и сохраняется в защищённом хранилище.</p>
     ${renderError()}
-    ${status ? `<div class="notice notice-${status.ok === false ? 'warn' : 'success'}">${escapeHtml(status.message || statusLabel(status.status))}</div>` : ''}
+    ${status ? `<div class="notice notice-${status.ok === false || status.historical || !status.ok ? 'warn' : 'success'}">${escapeHtml(status.message || statusLabel(status.status))}</div>` : ''}
     <div class="grid two">
       <div class="field">
         <label for="hubspot-mode">Способ подключения</label>
@@ -609,7 +705,7 @@ function renderHubspot() {
 
 function renderGoogle() {
   const mode = state.google.mode;
-  const status = state.google.test;
+  const status = state.google.test || (state.refs.google ? { status: 'configured', message: 'Доступ сохранён. Требуется повторная проверка.' } : null);
   let email = '';
   if (state.google.serviceAccountText.trim()) {
     try { email = JSON.parse(state.google.serviceAccountText).client_email || ''; } catch { email = ''; }
@@ -618,7 +714,7 @@ function renderGoogle() {
     <h3>Google Sheets</h3>
     <p class="lead">Вставьте полный URL таблицы — мастер извлечёт spreadsheet ID. Для полной автоматизации рекомендуется Service Account: он не требует OAuth-редиректа.</p>
     ${renderError()}
-    ${status ? `<div class="notice notice-${status.ok === false ? 'warn' : 'success'}">${escapeHtml(status.message)}</div>` : ''}
+    ${status ? `<div class="notice notice-${status.ok === false || status.historical || !status.ok ? 'warn' : 'success'}">${escapeHtml(status.message)}</div>` : ''}
     <div class="field">
       <label for="google-url">Ссылка на основную таблицу</label>
       <input id="google-url" data-model="google.mainUrl" placeholder="https://docs.google.com/spreadsheets/d/…/edit">
@@ -682,12 +778,12 @@ function renderGoogle() {
 }
 
 function renderTelegram() {
-  const status = state.telegram.test || (state.refs.telegram ? { status: 'configured', message: 'Сохранённый доступ уже подключён.' } : null);
+  const status = state.telegram.test || (state.refs.telegram ? { status: 'configured', message: 'Доступ сохранён. Требуется повторная проверка.' } : null);
   return `
     <h3>Telegram</h3>
     <p class="lead">Создайте бота через BotFather, добавьте его в чат и укажите Чат. Для групп ID отрицательный.</p>
     ${renderError()}
-    ${status ? `<div class="notice notice-${status.ok === false ? 'warn' : 'success'}">${escapeHtml(status.message || statusLabel(status.status))}</div>` : ''}
+    ${status ? `<div class="notice notice-${status.ok === false || status.historical || !status.ok ? 'warn' : 'success'}">${escapeHtml(status.message || statusLabel(status.status))}</div>` : ''}
     <div class="grid two">
       <div class="field">
         <label for="telegram-token">Токен бота</label>
@@ -731,8 +827,9 @@ function renderAdvanced() {
     <div class="field"><label for="map-${key}">${label}</label><input id="map-${key}" data-model="mapping.${key}" placeholder="${placeholder}"></div>`).join('');
   return `
     <h2>Дополнительные настройки</h2>
-    <p class="lead">Эти параметры нужны только для нестандартных интеграций. Значения по умолчанию безопасны.</p>
+    <p class="lead">Эти параметры нужны только для нестандартных интеграций. Значения по умолчанию безопасны. Сохранение выполняет тот же цикл проверки, что и запуск.</p>
     ${renderError()}
+    ${renderApplyStatus()}
     <h3>Поля входной заявки</h3>
     <div class="grid three">${mappingFields}</div>
     <p class="hint">Значения — имена полей JSON, которые присылает источник. Для вложенных полей используйте путь через точку.</p>
@@ -865,6 +962,7 @@ function renderReview() {
     <h2>Проверка и запуск</h2>
     <p class="lead">Проверьте сводку и подключения. Настройки будут сохранены, доступы — подготовлены, автоматизация — обновлена. При сбое мастер восстановит предыдущую конфигурацию.</p>
     ${renderError()}
+    ${renderApplyStatus()}
     ${state.applyStage ? `<div class="notice notice-info"><strong>${escapeHtml(state.applyStage)}</strong>Не закрывайте страницу до завершения операции.</div>` : ''}
     ${!state.boot?.n8n?.apiKeyConfigured ? '<div class="notice notice-warn"><strong>n8n не подключён</strong>Вернитесь к началу работы и подключите n8n, чтобы мастер мог настроить доступы.</div>' : ''}
     <div class="summary">
@@ -877,9 +975,9 @@ function renderReview() {
     </div>
     <div class="divider"></div>
     <div class="status-grid">
-      ${statusCard('CRM', crmState === 'verified' ? 'configured' : crmState === 'error' ? 'error' : crmState === 'unknown' ? 'unknown' : 'requires_auth', crmState === 'verified' ? 'Проверено' : crmState === 'configured' ? 'Настроено, не проверено' : crmState === 'unknown' ? 'Не используется' : 'Требует настройки')}
-      ${statusCard('Таблица', sheetState === 'verified' ? 'configured' : sheetState === 'error' ? 'error' : 'requires_auth', sheetState === 'verified' ? 'Проверено' : sheetState === 'configured' ? 'Настроено, не проверено' : sheetState === 'unknown' ? 'Не требуется' : 'Требует настройки')}
-      ${statusCard('Telegram', telegramState === 'verified' ? 'configured' : telegramState === 'error' ? 'error' : 'requires_auth', telegramState === 'verified' ? 'Проверено' : telegramState === 'configured' ? 'Настроено, не проверено' : telegramState === 'unknown' ? 'Не используется' : 'Требует настройки')}
+      ${statusCard('CRM', crmState === 'verified' ? 'configured' : crmState === 'error' ? 'error' : crmState === 'unknown' ? 'unknown' : 'requires_auth', integrationStatusNote(state.crmProvider === 'hubspot' ? 'hubspot' : 'google', crmState === 'unknown' ? 'Не используется' : 'Требует настройки'))}
+      ${statusCard('Таблица', sheetState === 'verified' ? 'configured' : sheetState === 'error' ? 'error' : 'requires_auth', integrationStatusNote('google', sheetState === 'unknown' ? 'Не используется' : 'Требует настройки'))}
+      ${statusCard('Telegram', telegramState === 'verified' ? 'configured' : telegramState === 'error' ? 'error' : 'requires_auth', integrationStatusNote('telegram', telegramState === 'unknown' ? 'Не используется' : 'Требует настройки'))}
       ${statusCard('Тестовая заявка', testLead?.result === 'PASS' ? 'configured' : testLead?.result === 'FAIL' ? 'error' : 'requires_auth', testLead?.result === 'PASS' ? 'Обработана' : testLead?.result === 'FAIL' ? 'Не прошла' : 'Ещё не отправлена')}
     </div>
     <div class="inline" style="margin-top:18px">
@@ -927,8 +1025,8 @@ function renderActions() {
     const save = document.createElement('button');
     save.type = 'button';
     save.className = 'btn btn-primary';
-    save.dataset.action = 'save-only';
-    save.textContent = state.busy ? 'Сохраняю…' : 'Сохранить настройки';
+    save.dataset.action = 'save-apply';
+    save.textContent = state.busy ? 'Применяю…' : 'Сохранить и применить';
     right.append(save);
   } else if (state.stepId !== 'done' && state.stepId !== 'maintenance') {
     const next = document.createElement('button');
@@ -960,14 +1058,22 @@ function hydrateStep(step) {
     const search = $('#tz-search');
     search.value = state.timezone;
     search.addEventListener('input', () => {
-      if (timezoneValid(search.value)) state.timezone = search.value;
+      if (state.timezone !== search.value) {
+        state.timezone = search.value;
+        markDirty();
+      }
+      if (timezoneValid(search.value)) delete state.fieldErrors.timezone;
+      else state.fieldErrors.timezone = 'Выберите корректный часовой пояс.';
       renderTimezoneResults(search.value);
     });
     search.addEventListener('change', () => {
-      if (timezoneValid(search.value)) {
+      if (state.timezone !== search.value) {
         state.timezone = search.value;
-        $('#tz-now').textContent = `Текущее время: ${timezoneNow(state.timezone)}`;
+        markDirty();
       }
+      if (timezoneValid(search.value)) delete state.fieldErrors.timezone;
+      else state.fieldErrors.timezone = 'Выберите корректный часовой пояс.';
+      $('#tz-now').textContent = `Текущее время: ${timezoneNow(state.timezone)}`;
     });
     search.addEventListener('focus', () => renderTimezoneResults(search.value));
     search.addEventListener('blur', () => setTimeout(() => $('#tz-results')?.classList.add('hidden'), 160));
@@ -1012,7 +1118,11 @@ function renderTimezoneResults(query) {
     button.textContent = zone;
     button.addEventListener('mousedown', (event) => {
       event.preventDefault();
-      state.timezone = zone;
+      if (state.timezone !== zone) {
+        state.timezone = zone;
+        delete state.fieldErrors.timezone;
+        markDirty();
+      }
       $('#tz-search').value = zone;
       $('#tz-now').textContent = `Текущее время: ${timezoneNow(zone)}`;
       box.classList.add('hidden');
@@ -1181,6 +1291,7 @@ function goNext() {
 }
 
 function goBack() {
+  if (state.dirty && !window.confirm('Есть несохранённые изменения. Перейти без сохранения?')) return;
   state.error = null;
   if (isExtraStep(state.stepId)) {
     state.stepId = state.stepId === 'advanced' ? 'company' : 'done';
@@ -1251,38 +1362,24 @@ async function createCredentials() {
   return true;
 }
 
-async function saveConfigOnly() {
-  state.error = null;
-  state.busy = true;
-  render();
-  try {
-    const config = buildConfig();
-    const validated = await api('api/config/validate', { method: 'POST', body: { config } });
-    const saved = await api('api/config', { method: 'POST', body: { config: validated.config } });
-    state.baseConfig = saved.config;
-    state.boot.config = saved.config;
-    state.boot.hasConfig = true;
-    state.dirty = false;
-    toast(saved.backupCreated ? 'Настройки сохранены. Предыдущая версия доступна в обслуживании.' : 'Настройки сохранены.');
-  } catch (error) {
-    state.error = errorMessage(error);
-  } finally {
-    state.busy = false;
-    render();
-  }
-}
-
 async function saveAndApply() {
   state.error = null;
   state.busy = true;
   state.applyStage = 'Проверка настроек';
   state.testLead = null;
+  state.doctor = null;
+  state.applyStatus = null;
   state.previousRefs = refsForApi();
+  state.previousConfigHash = state.boot?.configHash || null;
   state.lastBackup = null;
-  const previousConfig = state.boot?.config ? structuredClone(state.boot.config) : null;
+  state.lastWorkflowBackup = null;
+  const originStep = state.stepId;
+  const previousConfig = state.boot?.hasConfig && state.boot?.config
+    ? structuredClone(state.boot.config)
+    : null;
   let configSaved = false;
+  let workflowAttempted = false;
   render();
-  let workflowApplied = false;
   try {
     const config = buildConfig();
     const validated = await api('api/config/validate', { method: 'POST', body: { config } });
@@ -1292,7 +1389,12 @@ async function saveAndApply() {
       render();
       await createCredentials();
 
-      state.applyStage = 'Сохранение точки восстановления';
+      state.applyStage = 'Сохранение точки восстановления автоматизации';
+      render();
+      const workflowBackup = await api('api/workflow/backups', { method: 'POST', body: {} });
+      state.lastWorkflowBackup = workflowBackup.backup?.name || null;
+
+      state.applyStage = 'Сохранение точки восстановления настроек';
       render();
       try {
         const backup = await api('api/config/backups', { method: 'POST', body: {} });
@@ -1312,22 +1414,36 @@ async function saveAndApply() {
 
       state.applyStage = 'Применение автоматизации';
       render();
+      workflowAttempted = true;
       const applied = await api('api/workflow/apply', { method: 'POST', body: { credentials: refsForApi() } });
       state.workflow = applied.workflow;
-      workflowApplied = true;
 
       state.applyStage = 'Проверка результата';
       render();
       const doctor = await api('api/doctor', { method: 'POST', body: { integrationTest: false }, allowNotOk: true });
       state.doctor = doctor;
-      state.boot = await api('api/bootstrap');
+      if (doctor.result !== 'PASS') {
+        const error = new Error(
+          doctor.result === 'FAIL'
+            ? 'Проверка системы не пройдена: doctor вернул FAIL.'
+            : 'Проверка системы не подтверждена: doctor вернул UNVERIFIED.',
+        );
+        error.code = 'doctor_failed';
+        error.doctor = doctor;
+        throw error;
+      }
+
+      const currentBoot = await api('api/bootstrap');
+      await persistLiveVerifications(currentBoot.configHash).catch(() => {});
+      const boot = await api('api/bootstrap');
+      applyBootstrap(boot, { preserveLiveVerifications: true });
       state.dirty = false;
-      toast(
-        doctor.result === 'PASS'
-          ? 'Настройки применены. Теперь отправьте тестовую заявку.'
-          : 'Настройки применены, но проверка системы не пройдена. Смотрите отчёт.',
-        doctor.result === 'PASS' ? '' : 'error',
-      );
+      state.applyStatus = {
+        state: 'applied',
+        title: 'Настройки применены, doctor пройден',
+        message: 'Для подтверждения обработки отправьте тестовую заявку.',
+      };
+      toast('Настройки применены. Теперь отправьте тестовую заявку.');
     } else {
       state.applyStage = 'Сохранение конфигурации';
       render();
@@ -1338,42 +1454,93 @@ async function saveAndApply() {
       configSaved = true;
       state.dirty = false;
       state.manual = true;
+      state.applyStatus = {
+        state: 'not_applied',
+        title: 'Конфигурация сохранена, но не применена',
+        message: 'n8n не подключён, поэтому доступы и автоматизация не применялись. Подключите n8n и повторите применение.',
+      };
       toast('Конфигурация сохранена. Подключите n8n, чтобы назначить доступы автоматически.');
     }
   } catch (error) {
     const failure = errorMessage(error);
-    state.error = failure;
+    const notes = [];
+    let configRestored = false;
+    let workflowRestored = false;
+
+    const verifyConfigRestore = async () => {
+      const restoredBoot = await api('api/bootstrap');
+      return state.previousConfigHash
+        ? restoredBoot.configHash === state.previousConfigHash
+        : JSON.stringify(restoredBoot.config) === JSON.stringify(previousConfig);
+    };
+
     if (state.lastBackup) {
       try {
         await api('api/config/restore', {
           method: 'POST',
           body: { name: state.lastBackup, confirm: true },
         });
-        state.error = `${failure} Предыдущая конфигурация восстановлена.`;
+        configRestored = Boolean(await verifyConfigRestore());
+        if (!configRestored) notes.push('Backup восстановлен, но hash конфигурации не совпал с ожидаемым.');
       } catch (restoreError) {
-        state.error = `${failure} Не удалось автоматически восстановить конфигурацию: ${errorMessage(restoreError)}.`;
+        notes.push(`Backup конфигурации не восстановлен: ${errorMessage(restoreError)}.`);
       }
-    } else if (configSaved && previousConfig) {
+    }
+    if (!configRestored && configSaved && previousConfig) {
       try {
         await api('api/config', { method: 'POST', body: { config: previousConfig } });
-        state.error = `${failure} Предыдущая конфигурация восстановлена.`;
-      } catch {
-        state.error = `${failure} Автоматическое восстановление не удалось; проверьте настройки вручную.`;
+        configRestored = Boolean(await verifyConfigRestore());
+        notes.push(configRestored
+          ? 'Предыдущая конфигурация восстановлена и проверена.'
+          : 'Предыдущая конфигурация записана, но её hash не совпал с ожидаемым.');
+      } catch (restoreError) {
+        notes.push(`Не удалось автоматически восстановить конфигурацию: ${errorMessage(restoreError)}.`);
+      }
+    } else if (configRestored) {
+      notes.push('Предыдущая конфигурация восстановлена и проверена.');
+    } else if (configSaved) {
+      notes.push('Предыдущей конфигурации не было: автоматический откат файла невозможен. Проверьте настройки вручную.');
+    }
+
+    if (workflowAttempted && state.lastWorkflowBackup) {
+      try {
+        const restored = await api('api/workflow/restore', {
+          method: 'POST',
+          body: { backup: state.lastWorkflowBackup, confirm: true },
+        });
+        workflowRestored = restored.ok === true;
+        notes.push(workflowRestored
+          ? 'Workflow восстановлен и проверен по резервной копии.'
+          : 'Workflow отправлен в n8n, но фактическое состояние не совпало с резервной копией.');
+      } catch (restoreError) {
+        notes.push(`Не удалось восстановить workflow: ${errorMessage(restoreError)}.`);
       }
     }
-    if (workflowApplied && state.previousRefs) {
+    if (!workflowRestored && workflowAttempted && state.previousRefs) {
       try {
         await api('api/workflow/apply', { method: 'POST', body: { credentials: state.previousRefs } });
-        state.workflow = null;
-        state.error += ' Автоматизация возвращена к предыдущим доступам.';
-      } catch {
-        state.error += ' Автоматизация могла остаться в промежуточном состоянии — проверьте её в n8n.';
+        notes.push('Workflow возвращён к предыдущим доступам, но точное состояние не подтверждено.');
+      } catch (restoreError) {
+        notes.push(`Workflow мог остаться в промежуточном состоянии: ${errorMessage(restoreError)}.`);
       }
     }
+
+
+
+    state.workflow = null;
+    state.error = `${failure} ${notes.join(' ')}`.trim();
+    const partial = (configSaved && !configRestored) || (workflowAttempted && !workflowRestored);
+    state.applyStatus = {
+      state: partial ? 'partial' : 'rolled_back',
+      title: partial ? 'Применение частично выполнено' : 'Применение отменено',
+      message: partial
+        ? 'Не все изменения удалось откатить. Проверьте конфигурацию и workflow перед повторной попыткой.'
+        : 'Предыдущее состояние восстановлено. Исправьте ошибку и повторите применение.',
+    };
     const restoredBoot = await api('api/bootstrap').catch(() => null);
     if (restoredBoot) {
       applyBootstrap(restoredBoot);
-      state.stepId = 'verify';
+      state.stepId = originStep === 'advanced' ? 'advanced' : 'verify';
       state.dirty = false;
     }
     state.testLead = null;
@@ -1382,6 +1549,26 @@ async function saveAndApply() {
     state.applyStage = null;
     state.busy = false;
     render();
+  }
+}
+
+async function persistLiveVerifications(configHash) {
+  if (!configHash) return;
+  const tests = {
+    hubspot: state.hubspot.test,
+    google: state.google.test,
+    telegram: state.telegram.test,
+  };
+  const results = {};
+  for (const [kind, test] of Object.entries(tests)) {
+    if (test?.ok === true && !test.historical && (kind !== 'telegram' || test.details?.chatVerified === true)) {
+      results[kind] = { ok: true, status: test.status || 'connected' };
+    }
+  }
+  if (!Object.keys(results).length) return;
+  await api('api/verifications', { method: 'POST', body: { configHash, results } });
+  for (const kind of Object.keys(results)) {
+    if (tests[kind]) tests[kind].configHash = configHash;
   }
 }
 
@@ -1409,22 +1596,29 @@ async function runDoctor(integrationTest = false) {
 
 async function testIntegration(kind) {
   state.error = null;
+  const configHash = await draftConfigHash();
   try {
-    let values;
+    let result;
     if (kind === 'hubspot') {
-      values = state.hubspot.mode === 'service_key'
-        ? { token: state.hubspot.appToken }
-        : { clientId: state.hubspot.clientId, clientSecret: state.hubspot.clientSecret };
       if (state.hubspot.mode === 'oauth2') {
         toast('OAuth2 проверяется через сохранённый credential после Connect.');
         return;
       }
-      state.hubspot.test = await api('api/integrations/test', { method: 'POST', body: { kind, values } });
+      const values = { token: state.hubspot.appToken };
+      result = await api('api/integrations/test', {
+        method: 'POST',
+        body: { kind, values, configHash },
+      });
+      state.hubspot.test = { ...result, configHash: result.configHash || configHash, historical: false };
     }
     if (kind === 'telegram') {
-      values = { token: state.telegram.token, chatId: state.telegram.chatId };
-      state.telegram.test = await api('api/integrations/test', { method: 'POST', body: { kind, values } });
-      state.telegram.chats = Array.isArray(state.telegram.test?.details?.chats) ? state.telegram.test.details.chats : [];
+      const values = { token: state.telegram.token, chatId: state.telegram.chatId };
+      result = await api('api/integrations/test', {
+        method: 'POST',
+        body: { kind, values, configHash },
+      });
+      state.telegram.test = { ...result, configHash: result.configHash || configHash, historical: false };
+      state.telegram.chats = Array.isArray(result?.details?.chats) ? result.details.chats : [];
       if (!state.telegram.chatId && state.telegram.chats.length === 1) state.telegram.chatId = state.telegram.chats[0].id;
     }
     if (kind === 'google') {
@@ -1436,7 +1630,7 @@ async function testIntegration(kind) {
         toast('OAuth2 проверяется после Connect в n8n.');
         return;
       }
-      values = {
+      const values = {
         serviceAccount: state.google.serviceAccountText,
         spreadsheetId: spreadsheetId(state.google.mainUrl),
         sheetNames: [
@@ -1445,21 +1639,25 @@ async function testIntegration(kind) {
           ...(state.errorsEnabled ? [state.google.errorsSheet] : []),
         ].filter(Boolean),
       };
-      state.google.test = await api('api/integrations/test', { method: 'POST', body: { kind: 'google_service_account', values } });
+      result = await api('api/integrations/test', {
+        method: 'POST',
+        body: { kind: 'google_service_account', values, configHash },
+      });
+      state.google.test = { ...result, configHash: result.configHash || configHash, historical: false };
     }
-    toast(state.hubspot.test?.message || state.telegram.test?.message || state.google.test?.message || 'Проверка завершена.');
+    toast(result?.message || 'Проверка завершена.');
   } catch (error) {
     const message = errorMessage(error);
     if (kind === 'hubspot') {
-      state.hubspot.test = { ok: false, message: /значение обязательно/.test(message) ? 'Вставьте ключ private app.' : message };
+      state.hubspot.test = { ok: false, message: /значение обязательно/.test(message) ? 'Вставьте ключ private app.' : message, configHash, historical: false };
       if (/значение обязательно/.test(message)) state.fieldErrors.hubspotToken = 'Вставьте ключ private app.';
     }
     if (kind === 'telegram') {
-      state.telegram.test = { ok: false, message: /значение обязательно/.test(message) ? 'Вставьте токен бота и выберите чат.' : message };
+      state.telegram.test = { ok: false, message: /значение обязательно/.test(message) ? 'Вставьте токен бота и выберите чат.' : message, configHash, historical: false };
       if (/значение обязательно/.test(message)) state.fieldErrors.telegramToken = 'Вставьте токен бота.';
     }
     if (kind === 'google') {
-      state.google.test = { ok: false, message };
+      state.google.test = { ok: false, message, configHash, historical: false };
       if (/spreadsheetId/.test(message)) state.fieldErrors.googleUrl = 'Вставьте ссылку на таблицу.';
     }
     toast(message, 'error');
@@ -1470,13 +1668,19 @@ async function testIntegration(kind) {
 async function testExisting(kind) {
   const ref = state.refs[kind === 'hubspot' ? 'hubspot' : kind];
   if (!ref?.id) return;
+  const configHash = await draftConfigHash();
   state.busy = true;
   render();
   try {
-    const result = await api(`api/credentials/${encodeURIComponent(ref.id)}/test`, { method: 'POST', body: {}, allowNotOk: true });
-    if (kind === 'hubspot') state.hubspot.test = result;
-    if (kind === 'telegram') state.telegram.test = result;
-    if (kind === 'google') state.google.test = result;
+    const result = await api(`api/credentials/${encodeURIComponent(ref.id)}/test`, {
+      method: 'POST',
+      body: { kind, configHash },
+      allowNotOk: true,
+    });
+    const tested = { ...result, configHash: result.configHash || configHash, historical: false };
+    if (kind === 'hubspot') state.hubspot.test = tested;
+    if (kind === 'telegram') state.telegram.test = tested;
+    if (kind === 'google') state.google.test = tested;
     toast(result.message);
   } catch (error) {
     toast(errorMessage(error), 'error');
@@ -1725,7 +1929,6 @@ document.addEventListener('click', async (event) => {
     }
     return;
   }
-  if (action === 'save-only') await saveConfigOnly();
   if (action === 'save-apply') await saveAndApply();
   if (action === 'doctor') await runDoctor(false);
   if (action === 'test-hubspot') await testIntegration('hubspot');
@@ -1775,12 +1978,7 @@ document.addEventListener('click', async (event) => {
 document.addEventListener('input', (event) => {
   const model = event.target.dataset.model;
   if (!model) return;
-  state.dirty = true;
-  state.testLead = null;
-  state.doctor = null;
-  if (model.startsWith('hubspot.')) state.hubspot.test = null;
-  if (model.startsWith('google.')) state.google.test = null;
-  if (model.startsWith('telegram.')) state.telegram.test = null;
+  markDirty();
   delete state.fieldErrors[model.split('.')[0]];
   setPath(state, model, event.target.value);
   if (model === 'google.serviceAccountText') {
@@ -1793,12 +1991,7 @@ document.addEventListener('input', (event) => {
 document.addEventListener('change', (event) => {
   const model = event.target.dataset.model;
   if (!model) return;
-  state.dirty = true;
-  state.testLead = null;
-  state.doctor = null;
-  if (model.startsWith('hubspot.')) state.hubspot.test = null;
-  if (model.startsWith('google.')) state.google.test = null;
-  if (model.startsWith('telegram.')) state.telegram.test = null;
+  markDirty();
   const value = event.target.type === 'checkbox' ? event.target.checked : event.target.value;
   setPath(state, model, value);
   if (event.target.dataset.rerender) render();

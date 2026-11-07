@@ -137,6 +137,8 @@ test('server serves the wizard, injects a per-process token, and protects POSTs'
     const boot = await bootstrap.json();
     assert.equal(boot.ok, true);
     assert.equal(boot.n8n.apiKeyConfigured, false);
+    assert.match(boot.configHash, /^[a-f0-9]{64}$/);
+    assert.deepEqual(boot.verifications, {});
     assert.equal(JSON.stringify(boot).includes('test-webhook-secret'), false);
 
     const rejected = await fetch(`${baseUrl}/api/config`, {

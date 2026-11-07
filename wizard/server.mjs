@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import {
   ROOT,
   buildCandidateConfig,
+  configHash,
   createConfigBackup,
   listConfigBackups,
   loadCurrentConfig,
@@ -36,7 +37,9 @@ import {
   testStoredCredential,
 } from './lib/integrations.mjs';
 import { WORKFLOW_ID, applyWorkflowCredentials, installWorkflow } from './lib/workflow.mjs';
+import { createWorkflowBackup, restoreWorkflowBackup } from './lib/workflow-backup.mjs';
 import { runDoctor } from './lib/doctor.mjs';
+import { listVerifications, recordVerification } from './lib/verification-store.mjs';
 import { createOps } from './lib/ops.mjs';
 import {
   hostAllowed,
@@ -170,9 +173,12 @@ async function bootstrap(req) {
     warnings.push('n8n недоступен. Проверьте, что контейнер запущен.');
   }
 
+  const appliedConfigHash = current.config ? configHash(current.config) : null;
   return {
     ok: true,
     auth: { serverMode: SERVER_MODE },
+    configHash: appliedConfigHash,
+    verifications: await listVerifications(appliedConfigHash),
     setup: {
       ...urls,
       hasConfig: current.exists,
@@ -488,7 +494,17 @@ async function handleApi(req, res, url) {
   if (req.method === 'POST' && testMatch) {
     if (!requireToken(req, res)) return true;
     try {
+      const body = await readBody(req, res);
+      if (!body) return true;
       const result = await testStoredCredential(api, decodeURIComponent(testMatch[1]));
+      if (body.kind && body.configHash && result.ok && body.kind !== 'telegram') {
+        await recordVerification({
+          kind: body.kind,
+          ok: result.ok,
+          status: result.status,
+          configHash: body.configHash,
+        }).catch(() => {});
+      }
       sendJson(res, 200, result);
     } catch (error) {
       const mapped = mapError(error);
@@ -502,6 +518,63 @@ async function handleApi(req, res, url) {
     if (!body) return true;
     try {
       const result = await testIntegration(body.kind, body.values || {});
+      const verificationEligible = result.ok
+        && (body.kind !== 'telegram' || result.details?.chatVerified === true);
+      const verification = verificationEligible
+        ? await recordVerification({
+          kind: body.kind,
+          ok: result.ok,
+          status: result.status,
+          configHash: body.configHash,
+        }).catch(() => null)
+        : null;
+      sendJson(res, 200, { ...result, configHash: body.configHash || null, verification });
+    } catch (error) {
+      const mapped = mapError(error);
+      sendError(res, mapped.status, mapped.code, mapped.message);
+    }
+    return true;
+  }
+  if (req.method === 'POST' && url.pathname === '/api/verifications') {
+    if (!requireToken(req, res)) return true;
+    const body = await readBody(req, res);
+    if (!body) return true;
+    const results = body.results && typeof body.results === 'object' ? body.results : {};
+    const saved = [];
+    for (const [kind, result] of Object.entries(results)) {
+      if (!['hubspot', 'google', 'telegram'].includes(kind) || !result || typeof result !== 'object') continue;
+      const record = await recordVerification({
+        kind,
+        ok: result.ok === true,
+        status: result.status,
+        configHash: body.configHash,
+      }).catch(() => null);
+      if (record) saved.push(kind);
+    }
+    sendJson(res, 200, { ok: true, saved });
+    return true;
+  }
+  if (req.method === 'POST' && url.pathname === '/api/workflow/backups') {
+    if (!requireToken(req, res)) return true;
+    try {
+      const backup = await createWorkflowBackup(api);
+      sendJson(res, 200, { ok: true, backup });
+    } catch (error) {
+      const mapped = mapError(error);
+      sendError(res, mapped.status, mapped.code, mapped.message);
+    }
+    return true;
+  }
+  if (req.method === 'POST' && url.pathname === '/api/workflow/restore') {
+    if (!requireToken(req, res)) return true;
+    const body = await readBody(req, res);
+    if (!body) return true;
+    if (body.confirm !== true) {
+      sendError(res, 400, 'confirmation_required', 'Восстановление workflow требует подтверждения.');
+      return true;
+    }
+    try {
+      const result = await restoreWorkflowBackup(api, body.backup);
       sendJson(res, 200, result);
     } catch (error) {
       const mapped = mapError(error);

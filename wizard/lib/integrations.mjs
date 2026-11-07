@@ -264,7 +264,7 @@ export async function testIntegration(kind, values = {}) {
           ok: true,
           status: 'connected',
           message: 'Бот найден. Выберите чат из списка доступных.',
-          details: { botUsername: username, chats },
+          details: { botUsername: username, chats, chatVerified: false },
         };
       }
       return {
@@ -273,7 +273,7 @@ export async function testIntegration(kind, values = {}) {
         message: updates.ok
           ? 'Бот найден, но чаты не найдены. Напишите боту или добавьте его в группу, затем повторите проверку.'
           : 'Бот найден, но список чатов недоступен. Укажите Chat ID вручную или проверьте настройки бота.',
-        details: { botUsername: username, chats: [], needsChatId: true },
+        details: { botUsername: username, chats: [], needsChatId: true, chatVerified: false },
       };
     }
     const chat = await fetchJson(
@@ -287,6 +287,7 @@ export async function testIntegration(kind, values = {}) {
         details: {
           botUsername: username,
           chatTitle: chat.payload?.result?.title || chat.payload?.result?.username || null,
+          chatVerified: true,
         },
       };
     }
