@@ -150,7 +150,7 @@ async function bootstrap(req) {
       if (error instanceof N8nApiError && error.status === 404) {
         n8n.workflowExists = false;
       } else {
-        warnings.push(`Не удалось прочитать workflow: ${error.message}`);
+        warnings.push(`Не удалось прочитать автоматизацию: ${error.message}`);
       }
     }
     try {
@@ -164,7 +164,7 @@ async function bootstrap(req) {
       };
       if (credentials.google.type) credentials.google.mode = credentialKind(credentials.google.type);
     } catch (error) {
-      warnings.push(`Не удалось получить credentials: ${error.message}`);
+      warnings.push(`Не удалось получить доступы к сервисам: ${error.message}`);
     }
   } else if (api.configured && !reachable) {
     warnings.push('n8n недоступен. Проверьте, что контейнер запущен.');

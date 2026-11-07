@@ -1,134 +1,117 @@
-# Мастер настройки `/setup/` v0.5
+# Мастер настройки `/setup/`
 
-Мастер — часть единого Docker Compose-стека. Он не запускается отдельно на хосте и не публикует собственный порт наружу. Публичный адрес:
+Мастер — часть единого Docker Compose-стека. Публичный адрес:
 
 ```text
 https://<domain>/setup/
 ```
 
-Caddy снимает префикс `/setup` и проксирует запросы в контейнер `wizard:8787`. Относительные ссылки и API-пути браузера работают под `/setup/`.
-
 ## Первый вход
 
-1. Установите стек:
+Откройте first-run ссылку из вывода установщика:
 
-```bash
-sudo ./scripts/install-server.sh crm.example.com admin@example.com
+```text
+https://<domain>/setup/?token=<одноразовый-токен>
 ```
 
-2. Откройте first-run URL из вывода установщика или, при прямом Compose-запуске, возьмите токен из `wizard-data/bootstrap-token`:
-   `https://<domain>/setup/?token=<одноразовый-токен>`.
-3. Создайте единственного администратора. Пароль — не короче 12 символов.
-4. Подключите n8n API key в браузере.
-5. Пройдите шаги мастера.
+Мастер сам считывает подтверждение из ссылки и очищает URL. Введите имя администратора, пароль и подтверждение. Ручной ввод токена не требуется.
 
-После регистрации bootstrap-токен удаляется. Повторная регистрация возвращает `already_configured`; вход — по логину и паролю.
+Если ссылки нет, мастер не открывает регистрацию и показывает безопасную инструкцию. Повторное использование ссылки невозможно: после создания администратора она удаляется, а вход выполняется по логину и паролю. Восстановление пароля через мастер **НЕ РЕАЛИЗОВАНО**; администратор сервера должен создать новую установочную ссылку.
 
-## Полный цикл
+## Пять этапов
 
-| Шаг | Что настраивается |
-|---|---|
-| Обзор | n8n, API key, workflow, credentials, предупреждения |
-| Адрес | публичный URL, webhook, OAuth callback, проверка доступности |
-| Клиент | компания, IANA timezone, текущее время |
-| Интеграции | HubSpot / Google Sheets / без CRM, Journal, Telegram, Errors, источники |
-| HubSpot | private app, scopes, Service Key или OAuth2 |
-| Google Sheets | URL/ID, вкладки, Service Account/OAuth2, создание таблицы и заголовков |
-| Telegram | BotFather, token, Chat ID, `getMe`/`getChat` |
-| Маппинг и поведение | поля заявки, идемпотентность, retention, retry |
-| Проверка | сохранение, credentials, workflow, doctor, тестовая заявка |
-| Управление | сервисы, операции, retry, backup/restore, doctor |
+1. **Начало работы** — проверка n8n, подключение по API key, адрес приёма заявок и OAuth callback.
+2. **Настройка компании** — название компании и часовой пояс.
+3. **Подключение интеграций** — HubSpot, Google Sheets, Telegram; необязательные сервисы можно пропустить.
+4. **Проверка и запуск** — проверка системы, тестовая заявка, безопасное применение настроек.
+5. **Готово** — панель состояния системы и переход к работе.
 
-## Google Sheets: автоматическое создание
+Технические параметры вынесены в **«Дополнительные настройки»**: маппинг полей, идемпотентность, retention и повторная обработка. В **«Обслуживании»**: сервисы, операции, восстановление, резервные копии и проверка системы.
 
-Для Service Account доступна кнопка **«Создать таблицу и заголовки»**:
+## Статусы
 
-- если URL/ID не указан — создаётся новая таблица;
-- если указан — добавляются отсутствующие вкладки;
-- первая строка каждой вкладки заполняется заголовками из шаблона конфигурации;
-- существующие строки данных не изменяются.
+Статус этапа вычисляется по фактическим результатам:
 
-После создания откройте таблицу → **Share** → добавьте `client_email` сервисного аккаунта с правами Editor. OAuth2-режим требует ручного Connect в n8n; автоматическое создание доступно только для Service Account.
+- Не начато.
+- Требует действий.
+- Настроено, но не проверено.
+- Проверено.
+- Ошибка.
 
-## Управление
+Наличие сохранённого доступа само по себе не даёт статус «Проверено». Для CRM, таблицы, Telegram и тестовой заявки нужен подтверждённый результат проверки.
 
-Раздел «Управление» показывает:
+## Подключение n8n
 
-- доступность Caddy, n8n, PostgreSQL, Wizard;
-- количество операций и `needs_reconciliation`;
-- последние операции без raw payload;
-- ручной retry допустимых операций;
-- список backup-файлов конфигурации, создание и восстановление;
-- запуск doctor.
+1. Откройте n8n по ссылке из Мастера.
+2. Создайте владельца, если открываете n8n впервые.
+3. Откройте Settings → API.
+4. Создайте API key с правами:
+   - `workflow:read`
+   - `workflow:update`
+   - `workflow:activate`
+   - `credential:list`
+   - `credential:read`
+   - `credential:create`
+5. Скопируйте ключ и вставьте в Мастер.
+6. Нажмите «Подключить n8n».
 
-Retry разрешён только для `failed`, `retry_scheduled`, `needs_reconciliation`, `pending`. `completed` и активная `processing` отклоняются. Подтверждённые CRM/Journal стадии не выполняются повторно.
+Ключ проверяется server-side, шифруется AES-256-GCM и не возвращается в браузер, API, DOM, storage или логи.
 
-## API key n8n
+## Telegram
 
-Нужны scopes:
+После ввода токена нажмите «Проверить подключение». Мастер вызывает Telegram Bot API `getMe` и `getUpdates`, показывает доступные чаты и позволяет выбрать чат из списка. Если список пуст, отправьте боту сообщение и повторите; ручной Chat ID остаётся резервным вариантом.
 
-- `workflow:read`
-- `workflow:update`
-- `workflow:activate`
-- `credential:list`
-- `credential:read`
-- `credential:create`
+## Google Sheets
 
-Ключ вводится в браузере, проверяется server-side и сохраняется в `wizard-data/n8n-api-key.enc`:
+Для сервисного аккаунта доступно создание таблицы, вкладок и заголовков. Если таблица уже указана, мастер добавляет отсутствующие вкладки и обновляет первую строку заголовков, не изменяя строки данных. OAuth2 требует ручного входа в n8n.
 
-- AES-256-GCM;
-- ключ шифрования — `WIZARD_SECRET_KEY` через HKDF;
-- в API, DOM, localStorage/sessionStorage и логи ключ не возвращается.
+## Безопасное применение
 
-Без ключа серверный мастер не пропускает дальше шага «Обзор». Ручной режим v0.4 в v0.5 не поддерживается: настройка должна завершаться в браузере.
+Кнопка «Сохранить и применить»:
+
+1. проверяет конфигурацию;
+2. готовит доступы к сервисам;
+3. создаёт точку восстановления;
+4. сохраняет конфигурацию;
+5. обновляет автоматизацию;
+6. запускает проверку системы.
+
+При сбое мастер восстанавливает предыдущую конфигурацию и, если автоматизация уже успела обновиться, возвращает предыдущие доступы. Внешние сервисы не обещают атомарность: новые credentials могут остаться в n8n, но рабочая конфигурация и автоматизация не должны оставаться незаметно в промежуточном состоянии.
 
 ## API
 
-Все пути снаружи имеют префикс `/setup/`.
+Основные endpoints (снаружи с префиксом `/setup/`):
 
-| Метод | Путь | Назначение |
-|---|---|---|
-| GET | `/api/health` | healthcheck без авторизации |
-| GET | `/api/auth/status` | состояние входа/регистрации |
-| POST | `/api/auth/register` | первый администратор |
-| POST | `/api/auth/login` | вход |
-| POST | `/api/auth/logout` | выход и отзыв сессий |
-| GET | `/api/bootstrap` | конфиг, n8n, setup URLs, credentials |
-| POST | `/api/n8n/connect` | проверить и сохранить API key |
-| POST | `/api/config/validate` | валидация конфига |
-| POST | `/api/config` | атомарное сохранение с backup |
-| GET | `/api/config/backups` | список backup |
-| POST | `/api/config/backups` | создать backup |
-| POST | `/api/config/restore` | восстановить backup (confirm) |
-| GET | `/api/services` | доступность контейнеров |
-| GET | `/api/operations/summary` | сводка state machine |
-| GET | `/api/operations` | последние операции |
-| POST | `/api/operations/:id/retry` | ручной retry |
-| POST | `/api/google/provision` | создать таблицу/вкладки/заголовки |
-| GET | `/api/credentials` | metadata credentials |
-| POST | `/api/credentials` | создать/переиспользовать credential |
-| POST | `/api/credentials/:id/test` | тест credential |
-| POST | `/api/integrations/test` | прямой тест интеграций |
-| POST | `/api/workflow/apply` | назначить credentials 19 нодам |
-| POST | `/api/workflow/install` | импорт workflow (confirm) |
-| POST | `/api/doctor` | doctor; тестовая заявка (confirm) |
+```text
+GET  /api/auth/status
+POST /api/auth/register
+POST /api/auth/login
+POST /api/auth/logout
+GET  /api/bootstrap
+POST /api/n8n/connect
+POST /api/config/validate
+POST /api/config
+GET  /api/config/backups
+POST /api/config/backups
+POST /api/config/restore
+GET  /api/services
+GET  /api/operations/summary
+GET  /api/operations
+POST /api/operations/:id/retry
+POST /api/google/provision
+POST /api/credentials
+POST /api/integrations/test
+POST /api/workflow/apply
+POST /api/workflow/install
+POST /api/doctor
+```
 
-POST-запросы требуют `X-Wizard-Token`; все API, кроме health/auth, требуют сессию. Ошибки: `{ok:false,error,message}`.
-
-## Безопасность
-
-- Мастер доступен только через Caddy; контейнерный порт `8787` не публикуется.
-- Cookie: HttpOnly, SameSite=Strict, Secure, Path=/setup.
-- CSRF-токен вставляется в HTML meta и меняется при каждом запуске.
-- Проверяются Host, Origin, Content-Type; тело ограничено 2 МБ.
-- Конфиг пишется атомарно, mode `0600`, с backup.
-- API key и credential data не возвращаются в API.
-- Docker socket доступен контейнеру только для doctor/import/recovery. Компрометация root на хосте всё равно раскрывает секреты; нужны full-disk encryption и ограниченный доступ.
+POST-запросы требуют `X-Wizard-Token`; все API, кроме health/auth, требуют административную сессию.
 
 ## Ограничения
 
-- OAuth2 HubSpot/Google требует ручного Connect в n8n.
+- Живой OAuth Connect выполняется в n8n вручную.
 - Google Service Account требует шаринга таблицы на `client_email`.
-- `doctor --integration-test` использует фиксированный email и может обновить существующий контакт HubSpot; запуск только после подтверждения.
-- Kit не гарантирует exactly-once для внешних API; неоднозначные стадии требуют `needs_reconciliation`.
-- Изменение DNS/домена и TLS — инфраструктурная операция Caddy; мастер показывает текущий адрес и проверяет доступность, но не перевыпускает сертификаты.
+- `doctor --integration-test` использует фиксированный тестовый email и может обновить существующий контакт HubSpot.
+- Реальная тестовая заявка отправляется только после подтверждения.
+- Kit не гарантирует exactly-once для внешних API; неоднозначные стадии требуют проверки.

@@ -241,11 +241,39 @@ export async function testIntegration(kind, values = {}) {
     const username = me.payload?.result?.username || null;
     const chatId = String(values.chatId || '').trim();
     if (!chatId) {
+      const updates = await fetchJson(
+        `https://api.telegram.org/bot${token}/getUpdates?limit=100&timeout=0`,
+      );
+      const chats = [];
+      const seen = new Set();
+      for (const update of updates.payload?.result || []) {
+        const chat = update.message?.chat
+          || update.channel_post?.chat
+          || update.my_chat_member?.chat
+          || update.callback_query?.message?.chat;
+        if (!chat || chat.id === undefined || seen.has(String(chat.id))) continue;
+        seen.add(String(chat.id));
+        chats.push({
+          id: String(chat.id),
+          title: chat.title || [chat.first_name, chat.last_name].filter(Boolean).join(' ') || chat.username || String(chat.id),
+          type: chat.type || 'chat',
+        });
+      }
+      if (chats.length) {
+        return {
+          ok: true,
+          status: 'connected',
+          message: 'Бот найден. Выберите чат из списка доступных.',
+          details: { botUsername: username, chats },
+        };
+      }
       return {
         ok: true,
         status: 'connected',
-        message: 'Бот найден. Укажите Chat ID, чтобы проверить доступ к чату.',
-        details: { botUsername: username, needsChatId: true },
+        message: updates.ok
+          ? 'Бот найден, но чаты не найдены. Напишите боту или добавьте его в группу, затем повторите проверку.'
+          : 'Бот найден, но список чатов недоступен. Укажите Chat ID вручную или проверьте настройки бота.',
+        details: { botUsername: username, chats: [], needsChatId: true },
       };
     }
     const chat = await fetchJson(

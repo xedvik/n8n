@@ -3,7 +3,8 @@ const $ = (selector, root = document) => root.querySelector(selector);
 
 const ERROR_TEXT = {
   invalid_credentials: 'Неверный логин или пароль.',
-  invalid_token: 'Одноразовый токен недействителен или устарел.',
+  invalid_token: 'Ссылка установки недействительна или уже использована.',
+  invalid_bootstrap_token: 'Ссылка установки недействительна или уже использована.',
   already_configured: 'Первый администратор уже создан. Войдите с логином и паролем.',
   rate_limited: 'Слишком много попыток. Попробуйте позже.',
 };
@@ -79,26 +80,46 @@ function readSetupToken() {
   return token;
 }
 
-function renderRegister(setupToken) {
+function renderMissingLink() {
   const root = $('#auth-root');
   root.innerHTML = `
     <div class="auth-head">
       <div class="brand-mark" aria-hidden="true">CK</div>
       <div>
         <p class="eyebrow">CRM Automation Kit</p>
-        <h1>Первичная настройка</h1>
+        <h1>Нужна ссылка установки</h1>
       </div>
     </div>
-    <p class="lead">Создайте первого администратора. Одноразовый токен настройки выдаётся при запуске сервера.</p>
+    <div class="notice notice-warn">
+      <strong>Ссылка установки не найдена</strong>
+      Для создания первого администратора откройте одноразовую ссылку, которую выдал установщик.
+      Если ссылка потеряна, попросите администратора сервера сгенерировать новую.
+    </div>
+    <p class="auth-footnote">После создания администратора эта страница будет доступна только для входа.</p>
+  `;
+}
+
+function renderRegister(setupToken) {
+  if (!setupToken) {
+    renderMissingLink();
+    return;
+  }
+  const root = $('#auth-root');
+  root.innerHTML = `
+    <div class="auth-head">
+      <div class="brand-mark" aria-hidden="true">CK</div>
+      <div>
+        <p class="eyebrow">CRM Automation Kit</p>
+        <h1>Создание администратора</h1>
+      </div>
+    </div>
+    <p class="lead">Ссылка установки подтверждена. Создайте аккаунт, чтобы завершить настройку проекта.</p>
     <div id="auth-error" class="notice notice-error hidden" role="alert"></div>
     <form id="auth-form" class="auth-form" novalidate>
       <div class="field">
-        <label for="setup-token">Одноразовый токен настройки</label>
-        <input id="setup-token" name="token" type="text" value="${escapeHtml(setupToken)}" autocomplete="one-time-code" spellcheck="false" autocapitalize="none">
-      </div>
-      <div class="field">
-        <label for="username">Имя пользователя</label>
+        <label for="username">Имя администратора</label>
         <input id="username" name="username" type="text" autocomplete="username" spellcheck="false" autocapitalize="none" required>
+        <span class="hint">Латиница, цифры, точка, дефис или подчёркивание.</span>
       </div>
       <div class="field">
         <label for="password">Пароль</label>
@@ -111,24 +132,18 @@ function renderRegister(setupToken) {
       </div>
       <button type="submit" class="btn btn-primary auth-submit">Создать администратора</button>
     </form>
-    <p class="auth-footnote">Пароль и токен не сохраняются в браузере.</p>
+    <p class="auth-footnote">Ссылка одноразовая. Пароль не сохраняется в браузере.</p>
   `;
 
   const form = $('#auth-form');
   form.addEventListener('submit', async (event) => {
     event.preventDefault();
     clearError();
-    const token = form.token.value.trim();
     const username = form.username.value.trim();
     const password = form.password.value;
     const confirm = form.confirm.value;
-    if (!token) {
-      showError('Укажите одноразовый токен настройки.');
-      form.token.focus();
-      return;
-    }
     if (!username) {
-      showError('Укажите имя пользователя.');
+      showError('Укажите имя администратора.');
       form.username.focus();
       return;
     }
@@ -144,14 +159,15 @@ function renderRegister(setupToken) {
     }
     setBusy(form, true);
     try {
-      await api('api/auth/register', { method: 'POST', body: { token, username, password } });
+      await api('api/auth/register', { method: 'POST', body: { token: setupToken, username, password } });
       location.replace('./');
     } catch (error) {
       setBusy(form, false);
-      showError(errorMessage(error));
+      const message = errorMessage(error);
+      showError(`${message} Если ссылка потеряна, попросите администратора сервера создать новую ссылку установки.`);
     }
   });
-  form.token.focus();
+  form.username.focus();
 }
 
 function renderLogin() {
@@ -178,6 +194,10 @@ function renderLogin() {
       <button type="submit" class="btn btn-primary auth-submit">Войти</button>
     </form>
     <p class="auth-footnote">Пароль не сохраняется в браузере.</p>
+    <details class="auth-help">
+      <summary>Не удаётся войти?</summary>
+      <p>Восстановление пароля через мастер не предусмотрено. Попросите администратора сервера проверить доступ или создать новую установочную ссылку.</p>
+    </details>
   `;
 
   const form = $('#auth-form');
